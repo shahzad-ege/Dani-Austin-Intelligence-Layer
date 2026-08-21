@@ -1,0 +1,40 @@
+name: Run Connector Tests
+
+# Runs the offline test suite (mocked APIs, no real credentials needed) on
+# every push and PR. Catches parsing/logic bugs before they ever reach a
+# real QuickBooks/Airtable/Meta/TikTok account.
+on:
+  push:
+    paths:
+      - "connectors/**"
+  pull_request:
+    paths:
+      - "connectors/**"
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: connectors
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          # Fake values — these tests mock all network calls, so real
+          # credentials are never needed here.
+          DA_SUPABASE_URL: "https://fake.supabase.co"
+          DA_SUPABASE_SERVICE_KEY: "fake_key"
+        run: python -m pytest tests/ -v

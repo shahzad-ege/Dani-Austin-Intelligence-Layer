@@ -1,0 +1,66 @@
+name: Post-Level Sync
+
+# Runs SEPARATELY from daily-sync.yml, on a 12-hour cadence.
+#
+# WHY 12 HOURS, not daily: Instagram Stories insights are retrievable ONLY
+# while the story is live (24h) and vanish permanently on expiry -- there is
+# no backfill. A once-daily job will systematically miss any story posted
+# and expired between runs. Polling every 12h guarantees at least one
+# capture within any story's lifetime.
+#
+# This also suits TikTok's constraint from the opposite direction: reach,
+# completion rate, watch time and impression sources become unavailable
+# once a video has had no engagement for >7 days, so per-video capture
+# needs to happen within days of posting, not monthly.
+on:
+  schedule:
+    - cron: "0 6,18 * * *"   # 06:00 and 18:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  sync-posts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: connectors
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync Meta post-level data (IG posts, IG Stories, FB posts)
+        env:
+          DA_SUPABASE_URL: ${{ secrets.DA_SUPABASE_URL }}
+          DA_SUPABASE_SERVICE_KEY: ${{ secrets.DA_SUPABASE_SERVICE_KEY }}
+          META_SYSTEM_USER_TOKEN: ${{ secrets.META_SYSTEM_USER_TOKEN }}
+          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+        run: python -c "import meta_connector; print(f'Meta post sync: {meta_connector.sync_posts()} rows')"
+
+      - name: Sync TikTok per-video data
+        # continue-on-error: TikTok Accounts API approval is still pending at
+        # time of writing, so this step is expected to fail until it lands.
+        # It must not block the Meta sync above, which works today.
+        continue-on-error: true
+        env:
+          DA_SUPABASE_URL: ${{ secrets.DA_SUPABASE_URL }}
+          DA_SUPABASE_SERVICE_KEY: ${{ secrets.DA_SUPABASE_SERVICE_KEY }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          TIKTOK_BUSINESS_ID: ${{ secrets.TIKTOK_BUSINESS_ID }}
+        run: python -c "import tiktok_connector; print(f'TikTok post sync: {tiktok_connector.sync_posts()} rows')"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::Post-level sync failed — Stories data may have been permanently lost for this window."

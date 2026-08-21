@@ -1,0 +1,73 @@
+name: Daily Data Sync
+
+# Runs all connectors once a day. Add more connectors to run_all.py as
+# they come online (Meta/TikTok, Podstock) — no workflow changes needed.
+on:
+  schedule:
+    # 6:00 AM UTC daily. Adjust to your preferred time.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {} # allows manual "Run workflow" from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: connectors
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run all connectors
+        env:
+          DA_SUPABASE_URL: ${{ secrets.DA_SUPABASE_URL }}
+          DA_SUPABASE_SERVICE_KEY: ${{ secrets.DA_SUPABASE_SERVICE_KEY }}
+          QB_CLIENT_ID: ${{ secrets.QB_CLIENT_ID }}
+          QB_CLIENT_SECRET: ${{ secrets.QB_CLIENT_SECRET }}
+          QB_REFRESH_TOKEN: ${{ secrets.QB_REFRESH_TOKEN }}
+          QB_REALM_ID: ${{ secrets.QB_REALM_ID }}
+          QB_ENVIRONMENT: ${{ secrets.QB_ENVIRONMENT }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          SOCIALBLADE_CLIENT_ID: ${{ secrets.SOCIALBLADE_CLIENT_ID }}
+          SOCIALBLADE_TOKEN: ${{ secrets.SOCIALBLADE_TOKEN }}
+          BREX_API_TOKEN: ${{ secrets.BREX_API_TOKEN }}
+          PAYPAL_CLIENT_ID_DANI: ${{ secrets.PAYPAL_CLIENT_ID_DANI }}
+          PAYPAL_CLIENT_SECRET_DANI: ${{ secrets.PAYPAL_CLIENT_SECRET_DANI }}
+          PAYPAL_CLIENT_ID_KATELYN: ${{ secrets.PAYPAL_CLIENT_ID_KATELYN }}
+          PAYPAL_CLIENT_SECRET_KATELYN: ${{ secrets.PAYPAL_CLIENT_SECRET_KATELYN }}
+          PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
+          PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+          PLAID_ACCESS_TOKEN: ${{ secrets.PLAID_ACCESS_TOKEN }}
+          PLAID_ENV: ${{ secrets.PLAID_ENV }}
+          PLAID_DA_ACCOUNT_ID: ${{ secrets.PLAID_DA_ACCOUNT_ID }}
+          META_SYSTEM_USER_TOKEN: ${{ secrets.META_SYSTEM_USER_TOKEN }}
+          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          TIKTOK_BUSINESS_ID: ${{ secrets.TIKTOK_BUSINESS_ID }}
+          REVENUE_FORECAST_CSV_PATH: data/revenue_forecast.csv
+          CASH_FLOW_FORECAST_CSV_PATH: data/cash_flow_forecast.csv
+          AFFILIATE_REVENUE_CSV_PATH: data/affiliate_revenue.csv
+          PODCAST_METRICS_CSV_PATH: data/podcast_metrics.csv
+        run: python run_all.py
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::Daily sync failed — check the logs above for which connector failed."
+        # Optional: wire this step to Slack/email once you have a notify
+        # channel set up. Left as a plain log line for now.

@@ -1,0 +1,22 @@
+-- ============================================================
+-- Migration 002: Lock down rls_auto_enable() from public execution
+-- ============================================================
+--
+-- rls_auto_enable() is a pre-existing event trigger function (not
+-- something built for this project) that automatically enables RLS on
+-- any newly created table in the public schema -- a genuinely useful
+-- safety net, not something to remove.
+--
+-- The Supabase security advisor flagged it as WARN-level: it was
+-- executable via the public REST API (/rest/v1/rpc/rls_auto_enable) by
+-- both anonymous and signed-in users, because PostgreSQL grants EXECUTE
+-- to the PUBLIC pseudo-role by default when a function is created.
+--
+-- Calling it outside its actual event-trigger context would just error
+-- (it depends on pg_event_trigger_ddl_commands(), only valid inside a
+-- real DDL event trigger), so this was low real-world risk -- but there's
+-- no reason it needs to be publicly callable via the REST API at all.
+-- This revokes that public execute path without touching how the trigger
+-- itself fires internally.
+
+revoke execute on function public.rls_auto_enable() from public;

@@ -1,0 +1,25 @@
+name: Apply SQL Migrations
+
+# Manual-only. Run this after adding a new file to sql/ (e.g. when the
+# social or podcast connectors come online and need schema changes).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply all SQL files in sql/, in order
+        env:
+          DATABASE_URL: ${{ secrets.DA_DATABASE_URL }} # postgres connection string, from Supabase project settings
+        run: |
+          for f in $(ls sql/*.sql | sort); do
+            echo "Applying $f"
+            psql "$DATABASE_URL" -f "$f"
+          done
