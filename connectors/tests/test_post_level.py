@@ -417,3 +417,102 @@ def test_insufficient_viewers_is_never_cached_as_a_permanent_failure():
     assert len(call_log) == 1
     assert "views" in call_log[0]  # actually attempted, not skipped
     assert len(result) == 1 and result[0].value == 500000.0  # real data NOT lost
+
+
+# ---------- TikTok token refresh: the actual request shape (never tested before) ----------
+
+def test_tiktok_refresh_uses_correct_endpoint_and_field_names():
+    """
+    Regression test for a real production bug: the connector called
+    /oauth2/access_token/ (for the initial code exchange) with
+    client_key/client_secret (the WRONG field names for this API) instead
+    of the separate /oauth2/refresh_token/ endpoint with app_id/secret.
+    TikTok's error ("app_id: Missing data for required field") looked like
+    an access-approval problem but was actually this bug. No test
+    previously checked the actual request shape -- every test mocked
+    refresh_access_token() away entirely.
+    """
+    captured = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured["url"] = url
+        captured["body"] = json
+        return MagicMock(
+            status_code=200,
+            json=lambda: {"data": {"access_token": "real_token"}},
+            raise_for_status=lambda: None,
+        )
+
+    with patch("tiktok_connector.requests.post", side_effect=fake_post):
+        token = tiktok_connector.refresh_access_token()
+
+    assert token == "real_token"
+    assert captured["url"].endswith("/oauth2/refresh_token/")
+    assert "/oauth2/access_token/" not in captured["url"]
+    assert "app_id" in captured["body"]
+    assert "secret" in captured["body"]
+    assert "client_key" not in captured["body"]
+    assert "client_secret" not in captured["body"]
+
+
+def test_tiktok_refresh_diagnostic_shows_real_error_body():
+    """The exact real production error must be surfaced in full, not
+    swallowed into a bare KeyError."""
+    real_production_error = {
+        "code": 40002,
+        "message": "app_id: Missing data for required field.",
+        "request_id": "20260821220037B04D2574C22110DB8FE8",
+    }
+
+    with patch("tiktok_connector.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(
+            status_code=200, json=lambda: real_production_error, raise_for_status=lambda: None
+        )
+        try:
+            tiktok_connector.refresh_access_token()
+            assert False, "Expected a RuntimeError"
+        except RuntimeError as e:
+            assert "app_id: Missing data for required field" in str(e)
+            assert "40002" in str(e)
+
+
+# ---------- Empty (not just missing) GitHub secrets: must fail clearly, and lazily ----------
+
+def test_import_never_fails_even_with_empty_credentials():
+    """
+    CRITICAL isolation test: run_all.py imports every connector at module
+    level, OUTSIDE its per-connector try/except. If tiktok_connector raised
+    on import when credentials are empty, it would crash the ENTIRE daily
+    sync before any connector ran -- exactly the bug this test guards
+    against. The validation must be lazy (checked only when the connector
+    is actually invoked), not eager (checked at import time).
+    """
+    with patch.dict(os.environ, {"TIKTOK_CLIENT_KEY": ""}, clear=False):
+        import importlib
+        import tiktok_connector as tc
+        importlib.reload(tc)  # must NOT raise, even with an empty credential
+
+
+def test_refresh_fails_clearly_when_credential_is_empty_not_missing():
+    """
+    The actual bug this fixes: a GitHub secret that exists but was never
+    filled in becomes an empty string, not a missing env var -- plain
+    os.environ["X"] reads succeed either way. Without this check, the
+    failure only surfaces as a confusing TikTok API error two calls later
+    ("app_id: Missing data for required field"), which looks like an
+    access-approval problem rather than a blank secret.
+    """
+    with patch.dict(os.environ, {"TIKTOK_CLIENT_KEY": ""}, clear=False):
+        import importlib
+        import tiktok_connector as tc
+        importlib.reload(tc)
+
+        try:
+            tc.refresh_access_token()
+            assert False, "Expected a RuntimeError for the empty credential"
+        except RuntimeError as e:
+            assert "TIKTOK_CLIENT_KEY" in str(e)
+            assert "EMPTY" in str(e)
+
+    # Restore the real test value so later tests in this file aren't affected
+    importlib.reload(tc)
