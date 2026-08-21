@@ -49,9 +49,15 @@ SOCIALBLADE_BASE_URL = "https://matrix.sbapis.com/b"
 # run — account_id can just mirror handle for platforms where Social Blade
 # keys off username rather than a separate numeric ID.
 SEED_ACCOUNTS = [
+    # CONFIRMED real handles -- "daniaustin" was correct for Instagram, but
+    # WRONG for TikTok and Facebook (Social Blade returned a ghost/near-empty
+    # account under that name for both, cross-verified as wrong against real
+    # Meta data). These are the corrected handles that produced plausible,
+    # cross-verified numbers (Facebook followers matched Meta's own connector
+    # within 0.03%; TikTok showed a real 1.1M-follower account instead of 65).
     SocialAccount(platform="instagram", handle="daniaustin", account_id="daniaustin_ig", is_core=True),
-    SocialAccount(platform="tiktok", handle="daniaustin", account_id="daniaustin_tiktok", is_core=True),
-    SocialAccount(platform="facebook", handle="daniaustin", account_id="daniaustin_fb", is_core=True),
+    SocialAccount(platform="tiktok", handle="thedaniaustin", account_id="daniaustin_tiktok", is_core=True),
+    SocialAccount(platform="facebook", handle="daniaustinofficial", account_id="daniaustin_fb", is_core=True),
 ]
 
 # Maps our metric names -> the field names Social Blade actually returns,

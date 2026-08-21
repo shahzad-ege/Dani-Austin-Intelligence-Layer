@@ -53,7 +53,22 @@ def refresh_access_token() -> str:
         },
     )
     resp.raise_for_status()
-    return resp.json()["data"]["access_token"]
+    payload = resp.json()
+
+    # Bare `payload["data"]["access_token"]` produced an unhelpful
+    # KeyError with no context when this ran in CI (TikTok access not yet
+    # approved). TikTok's own error responses put details in a top-level
+    # `error` field distinct from `data` -- surface that directly instead
+    # of a bare KeyError, so a real approval-status problem is
+    # distinguishable from an actual code bug at a glance.
+    if "data" not in payload:
+        error_info = payload.get("error", payload)
+        raise RuntimeError(
+            f"TikTok token refresh did not return the expected shape. "
+            f"This usually means Accounts API access isn't approved yet, "
+            f"or credentials are wrong. Raw response: {error_info}"
+        )
+    return payload["data"]["access_token"]
 
 
 def seed_account() -> int:
