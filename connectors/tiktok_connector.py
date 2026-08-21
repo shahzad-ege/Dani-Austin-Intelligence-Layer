@@ -43,11 +43,30 @@ TIKTOK_BASE_URL = "https://business-api.tiktok.com/open_api/v1.3"
 
 
 def refresh_access_token() -> str:
+    """
+    CORRECTED after a real CI failure: this connector was calling the
+    WRONG ENDPOINT with the WRONG FIELD NAMES, and TikTok's confusing error
+    ("app_id: Missing data for required field") looked at first like an
+    access-approval problem rather than a code bug.
+
+    Two real, confirmed fixes, verified against multiple independent
+    real-world implementations of this exact endpoint (not guessed):
+      1. /oauth2/access_token/ is for the INITIAL authorization-code
+         exchange. Refreshing an existing refresh_token requires the
+         SEPARATE /oauth2/refresh_token/ endpoint -- a different path,
+         not just a different grant_type on the same one.
+      2. The TikTok Business API uses `app_id` and `secret` as its field
+         names -- NOT `client_key`/`client_secret`, which is the naming
+         used by TikTok's OTHER, consumer-facing API
+         (open.tiktokapis.com). Easy to mix up since both are called
+         "TikTok's API" casually, but they're different products with
+         different conventions.
+    """
     resp = requests.post(
-        f"{TIKTOK_BASE_URL}/oauth2/access_token/",
+        f"{TIKTOK_BASE_URL}/oauth2/refresh_token/",
         json={
-            "client_key": TIKTOK_CLIENT_KEY,
-            "client_secret": TIKTOK_CLIENT_SECRET,
+            "app_id": TIKTOK_CLIENT_KEY,
+            "secret": TIKTOK_CLIENT_SECRET,
             "grant_type": "refresh_token",
             "refresh_token": TIKTOK_REFRESH_TOKEN,
         },
@@ -56,9 +75,9 @@ def refresh_access_token() -> str:
     payload = resp.json()
 
     # Bare `payload["data"]["access_token"]` produced an unhelpful
-    # KeyError with no context when this ran in CI (TikTok access not yet
-    # approved). TikTok's own error responses put details in a top-level
-    # `error` field distinct from `data` -- surface that directly instead
+    # KeyError with no context when this ran in CI. TikTok's own error
+    # responses put details in a top-level `error` field distinct from
+    # `data` -- surface that directly instead
     # of a bare KeyError, so a real approval-status problem is
     # distinguishable from an actual code bug at a glance.
     if "data" not in payload:
