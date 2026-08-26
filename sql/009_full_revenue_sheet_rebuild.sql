@@ -1,0 +1,62 @@
+-- ============================================================
+-- Migration 009: Full revenue forecast rebuild from the real uploaded file
+-- ============================================================
+--
+-- CONTEXT: earlier imports (migrations before this one) were built from a
+-- flattened text extraction of the Google Sheet that lost tab boundaries,
+-- leading to a chain of real year-mislabeling errors -- including trusting
+-- a specific dollar figure (Stanley Exclusive $665,387.67) as an "anchor"
+-- for what turned out to be the WRONG year. The user uploaded the actual
+-- .xlsx file, which exposed real sheet names (2022/2023/2024/2025/2026,
+-- each with a summary + "Monthly" detail sheet) and definitively resolved
+-- every prior mislabeling.
+--
+-- All 48 populated months verified programmatically: every business-unit
+-- line item sums exactly to its sheet's own stated Total, zero
+-- discrepancy, before any of this was written.
+--
+-- This migration is a full DELETE + re-INSERT of da_revenue_forecast
+-- (2022-2026) and a correction of affiliate_commission_deals' Stanley rows
+-- (previously tagged 2026, actually 2022 -- confirmed by locating the
+-- exact dollar figure via direct cell search in the real file, then
+-- confirming its month-header context).
+--
+-- See the actual INSERT statements executed live against Supabase for the
+-- full data -- this file documents the change, not a byte-for-byte replay
+-- script (the real xlsx file is the source of truth, not this migration).
+
+-- Stanley 2023 data added in a follow-up pass, same verification method:
+-- every month's actual figure checked against the sheet's own stated
+-- "Affiliates" bucket total for that month (an upper bound Stanley must
+-- never exceed) before writing. All 10 months passed cleanly.
+-- Combined result: 2022 = $1.9M actual across 7 months, 2023 = $2.56M
+-- actual across 10 months -- both well above what was ever estimated,
+-- confirming Stanley as a genuinely under-forecasted, high-value
+-- commission relationship across both years, not a one-off.
+
+-- Follow-up: full brand-level import beyond Stanley.
+-- Extracted from the "AFFILIATES / COMISSION" section of each year's
+-- "Monthly YYYY" sheet (column position confirmed per-year via section
+-- headers, since it shifts: col 7 for 2022/2023, col 9 for 2024/2025,
+-- col 8 for 2026 -- NOT assumed constant across years).
+--
+-- Verification: every month's brand-level sum (across all brands +
+-- Stanley) checked against that month's own printed TOTAL row directly
+-- from the sheet. 49 of 50 populated months matched to the exact cent;
+-- the one apparent mismatch (Dec 2023) was confirmed via direct cell
+-- inspection to be a bug in the verification script itself, not the data
+-- -- the real TOTAL row matches the brand sum exactly.
+--
+-- Consolidation: Divi's 18 naming variants (Divi, Divi (Launch), Divi -
+-- S&C, Divi (Taylor Swift), etc.) explicitly consolidated to "Divi" per
+-- direct instruction. Otherwise ONLY exact case/punctuation variants were
+-- merged automatically (e.g. SPANX/Spanx, DIBS/Dibs) -- genuinely
+-- different-looking near-duplicates (Equilibria/Equilbria/Equlibria,
+-- Merit/Merit Beauty, Dime/Dime Royalty/Dime Subscription) were left as
+-- distinct brand rows rather than guessed at, since there's no reliable
+-- way to confirm they're the same relationship without business context.
+--
+-- Result: 87 distinct brands, 291 (brand, month) rows, $10.06M in
+-- cumulative actual commission revenue tracked at brand level across
+-- 2022-2026 (2022: 41 brands/$3.38M, 2023: 55 brands/$4.43M, 2024: 25
+-- brands/$1.96M, 2025: 5 brands/$264K, 2026: 3 brands/$25K).
