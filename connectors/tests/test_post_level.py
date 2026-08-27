@@ -516,3 +516,67 @@ def test_refresh_fails_clearly_when_credential_is_empty_not_missing():
 
     # Restore the real test value so later tests in this file aren't affected
     importlib.reload(tc)
+
+
+# ---------- Historical backfill pagination ----------
+
+def test_fetch_instagram_posts_follows_pagination_cursor():
+    """The core fix: max_pages > 1 must actually follow Meta's paging.next
+    cursor to get older posts, not just re-fetch the same first page."""
+    page1 = {
+        "data": [{"id": "post_new", "media_type": "IMAGE", "timestamp": "2026-08-01T00:00:00+0000"}],
+        "paging": {"next": "https://graph.facebook.com/v25.0/test_ig_id/media?after=CURSOR1&access_token=fake"},
+    }
+    page2 = {
+        "data": [{"id": "post_old", "media_type": "IMAGE", "timestamp": "2024-01-01T00:00:00+0000"}],
+        "paging": {},  # no further pages
+    }
+
+    call_log = []
+
+    def fake_get(url, params=None, **kwargs):
+        call_log.append(url)
+        if "after=CURSOR1" in url:
+            return MagicMock(status_code=200, json=lambda: page2, raise_for_status=lambda: None)
+        return MagicMock(status_code=200, json=lambda: {"data": [{"name": "views", "values": [{"value": 1}]}]},
+                         raise_for_status=lambda: None)
+
+    with patch("meta_connector._get", side_effect=lambda path, params, token=None: page1 if "media" in path else {"data": []}), \
+         patch("meta_connector.requests.get", side_effect=fake_get):
+        posts, metrics = meta_connector.fetch_instagram_posts(max_pages=2)
+
+    post_ids = {p.post_id for p in posts}
+    assert "post_new" in post_ids
+    assert "post_old" in post_ids  # only reachable if pagination actually followed the cursor
+    assert any("after=CURSOR1" in c for c in call_log)
+
+
+def test_fetch_instagram_posts_default_max_pages_stays_single_page():
+    """The regular daily sync_posts() path must NOT change behavior --
+    default max_pages=1 should never follow a next cursor, keeping the
+    lightweight daily call cheap."""
+    page1 = {
+        "data": [{"id": "post_a", "media_type": "IMAGE", "timestamp": "2026-08-01T00:00:00+0000"}],
+        "paging": {"next": "https://graph.facebook.com/v25.0/test_ig_id/media?after=SHOULD_NOT_BE_CALLED"},
+    }
+
+    with patch("meta_connector._get", return_value=page1), \
+         patch("meta_connector.requests.get") as mock_requests_get:
+        posts, metrics = meta_connector.fetch_instagram_posts()  # default max_pages=1
+
+    mock_requests_get.assert_not_called()  # pagination cursor must NOT be followed
+    assert len(posts) == 1
+
+
+def test_backfill_historical_posts_excludes_stories():
+    """Stories have no backfill possible (24h expiry, no exceptions) --
+    the backfill function must not attempt to fetch them at all."""
+    with patch("meta_connector.fetch_instagram_posts", return_value=([], [])) as mock_ig, \
+         patch("meta_connector.fetch_facebook_posts", return_value=([], [])) as mock_fb, \
+         patch("meta_connector.fetch_instagram_stories") as mock_stories, \
+         patch("meta_connector.upsert_rows", return_value=0):
+        meta_connector.backfill_historical_posts(max_pages=5)
+
+    mock_stories.assert_not_called()
+    mock_ig.assert_called_once_with(max_pages=5)
+    mock_fb.assert_called_once_with(max_pages=5)

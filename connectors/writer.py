@@ -14,6 +14,8 @@ from db import get_client
 CONFLICT_KEYS = {
     "qb_da_transaction_lines": "qb_txn_id,qb_line_id",
     "qb_oauth_credentials": "realm_id",
+    "qb_da_invoices": "qb_invoice_id",
+    "qb_da_invoices_daily_snapshot": "qb_invoice_id,snapshot_date",
     "airtable_partnerships": "deal_id",
     "da_cash_current_balance": None,  # append-only log, no upsert
     "da_cash_flow_forecast": "month,line_item",

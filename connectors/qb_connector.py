@@ -320,6 +320,73 @@ ENTITY_CONFIG = [
 ]
 
 
+def extract_ar_invoice(txn: dict) -> dict | None:
+    """
+    Extracts invoice-HEADER-level AR data: Balance (remaining unpaid amount)
+    and DueDate. Deliberately separate from extract_income_lines() -- those
+    fields live on the invoice itself, not on individual line items, so
+    this needs its own extraction path rather than reusing the line-level
+    one. Balance and DueDate are core, long-standing QuickBooks Invoice
+    fields (unlike some of the more obscure fields this project has had to
+    discover through trial and error elsewhere) -- not guessed.
+    """
+    invoice_id = txn.get("Id")
+    if invoice_id is None:
+        return None
+    return {
+        "qb_invoice_id": str(invoice_id),
+        "customer_name": (txn.get("CustomerRef") or {}).get("name"),
+        "txn_date": txn.get("TxnDate"),
+        "due_date": txn.get("DueDate"),
+        "total_amount": txn.get("TotalAmt"),
+        "balance": txn.get("Balance"),
+    }
+
+
+def sync_ar_aging() -> int:
+    """
+    Pulls ALL Invoice entities -- deliberately NOT filtered by a rolling
+    date window the way the regular transaction-line sync is. AR aging
+    cares about which invoices are STILL OPEN today regardless of how old
+    they are; a 2-year-old unpaid invoice is exactly as relevant to a
+    current AR position as one from last week. Separate entry point from
+    run(), since it's a different query shape and a different table.
+
+    Writes to TWO tables, not one:
+      - qb_da_invoices: current state (upserted, overwrites balance each
+        run) -- the fast, simple "what's owed right now" table.
+      - qb_da_invoices_daily_snapshot: append-only, one row per invoice per
+        day. Needed because the upsert table alone can't answer "was this
+        settled, and when" -- once an invoice is paid, its prior open
+        balance would just be overwritten and lost with no history.
+    """
+    access_token = refresh_access_token()
+    invoices = qb_query(access_token, "SELECT * FROM Invoice")
+
+    records = []
+    for inv in invoices:
+        parsed = extract_ar_invoice(inv)
+        if parsed and parsed["qb_invoice_id"]:
+            records.append(parsed)
+
+    written = upsert_rows("qb_da_invoices", records)
+
+    snapshot_rows = [
+        {
+            "qb_invoice_id": r["qb_invoice_id"],
+            "customer_name": r["customer_name"],
+            "due_date": r["due_date"],
+            "balance": r.get("balance") or 0,
+        }
+        for r in records
+    ]
+    upsert_rows("qb_da_invoices_daily_snapshot", snapshot_rows)
+
+    open_count = sum(1 for r in records if (r.get("balance") or 0) > 0)
+    print(f"[qb] AR sync: {len(records)} invoice(s) total, {open_count} currently open (unpaid)")
+    return written
+
+
 def run(since: date | None = None) -> int:
     since = since or (date.today() - timedelta(days=90))
     access_token = refresh_access_token()
@@ -335,5 +402,38 @@ def run(since: date | None = None) -> int:
 
 
 if __name__ == "__main__":
-    count = run()
-    print(f"QuickBooks connector: upserted {count} transaction lines.")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Sync QuickBooks data to Supabase")
+    parser.add_argument("--since", type=str, default=None,
+                        help="Pull transactions from this date onward (YYYY-MM-DD). "
+                             "Default: last 90 days.")
+    parser.add_argument("--full-history", action="store_true",
+                        help="Pull EVERYTHING the company file has, ignoring --since. "
+                             "QuickBooks itself has no retention limit -- the 90-day "
+                             "default is our own choice, not a platform constraint. "
+                             "Expect this to surface accounts not yet in "
+                             "qb_account_business_unit_map; new needs_review rows are "
+                             "expected, not a bug.")
+    parser.add_argument("--ar-aging", action="store_true",
+                        help="Sync Accounts Receivable aging instead of transaction "
+                             "lines -- pulls all Invoice records (open and closed) with "
+                             "their Balance and DueDate, for the AR position/aging "
+                             "views. A separate mode from the regular sync since it's a "
+                             "different query and a different table.")
+    args = parser.parse_args()
+
+    if args.ar_aging:
+        count = sync_ar_aging()
+        print(f"QuickBooks AR aging sync: upserted {count} invoice(s).")
+    else:
+        if args.full_history:
+            since_date = date(2000, 1, 1)  # effectively "everything"
+            print("[qb] Full-history backfill requested -- pulling all available transactions.")
+        elif args.since:
+            since_date = date.fromisoformat(args.since)
+        else:
+            since_date = None  # falls back to run()'s own 90-day default
+
+        count = run(since=since_date)
+        print(f"QuickBooks connector: upserted {count} transaction lines.")

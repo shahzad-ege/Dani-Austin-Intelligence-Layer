@@ -595,9 +595,36 @@ def _fetch_post_insights(post_id: str, metrics: list[str], now: datetime,
         return records
 
 
-def fetch_instagram_posts() -> tuple[list[SocialPost], list[SocialPostMetric]]:
+def _get_next_page(next_url: str) -> dict:
+    """
+    Follows Meta's own pagination cursor. `paging.next` is a complete,
+    ready-to-use URL (already includes the access token), so this bypasses
+    _get()'s path+params construction and just requests it directly.
+    """
+    resp = requests.get(next_url)
+    if resp.status_code >= 400:
+        print(f"[meta] API error response body: {resp.text}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_instagram_posts(limit: int = POSTS_PER_PLATFORM_LIMIT, max_pages: int = 1) -> tuple[list[SocialPost], list[SocialPostMetric]]:
     """
     Feed posts and Reels, with per-post insights.
+
+    `max_pages` controls historical depth: the regular daily sync passes 1
+    (just the most recent `limit` posts, cheap). A historical backfill
+    passes a higher number to page back through older content via Meta's
+    own pagination cursor.
+
+    HARD LIMIT, not arbitrary: Instagram media-level insights retain for
+    roughly 2 years, not indefinitely (this is a real Meta-documented
+    constraint, unlike the 90-day cap on ACCOUNT-level insights, which is
+    tighter still and cannot be backfilled at all once missed). Once posts
+    age past that window, per-post insight calls will start failing --
+    _fetch_post_insights already handles that gracefully (isolates the
+    failure per metric, doesn't crash the whole backfill), so an aging-out
+    post just ends up with fewer captured metrics, not a hard stop.
 
     Requests branded-content fields so paid partnerships are identifiable --
     the direct programmatic link between a post and Brand Partnership
@@ -607,33 +634,44 @@ def fetch_instagram_posts() -> tuple[list[SocialPost], list[SocialPostMetric]]:
     """
     now = datetime.now(timezone.utc)
     fields = "id,caption,media_type,permalink,timestamp,like_count,comments_count"
-    media_resp = _get(f"{META_IG_USER_ID}/media",
-                      {"fields": fields, "limit": POSTS_PER_PLATFORM_LIMIT})
 
     posts, metrics = [], []
-    for item in media_resp.get("data", []):
-        post_id = item.get("id")
-        if not post_id:
-            continue
-        media_type = item.get("media_type")
+    page_num = 0
+    payload = _get(f"{META_IG_USER_ID}/media", {"fields": fields, "limit": limit})
 
-        posted_at = None
-        if item.get("timestamp"):
-            try:
-                posted_at = datetime.fromisoformat(item["timestamp"].replace("+0000", "+00:00"))
-            except ValueError:
-                pass
+    while True:
+        page_num += 1
+        page_items = payload.get("data", [])
+        print(f"[meta] Instagram posts, page {page_num}: {len(page_items)} item(s)")
 
-        posts.append(SocialPost(
-            account_id=META_IG_USER_ID, post_id=post_id, platform="instagram",
-            media_type=media_type, caption=item.get("caption"),
-            permalink=item.get("permalink"), posted_at=posted_at,
-        ))
+        for item in page_items:
+            post_id = item.get("id")
+            if not post_id:
+                continue
+            media_type = item.get("media_type")
 
-        wanted = list(IG_POST_METRICS)
-        if media_type in ("VIDEO", "REEL"):
-            wanted += IG_REEL_EXTRA_METRICS
-        metrics.extend(_fetch_post_insights(post_id, wanted, now, media_type=media_type))
+            posted_at = None
+            if item.get("timestamp"):
+                try:
+                    posted_at = datetime.fromisoformat(item["timestamp"].replace("+0000", "+00:00"))
+                except ValueError:
+                    pass
+
+            posts.append(SocialPost(
+                account_id=META_IG_USER_ID, post_id=post_id, platform="instagram",
+                media_type=media_type, caption=item.get("caption"),
+                permalink=item.get("permalink"), posted_at=posted_at,
+            ))
+
+            wanted = list(IG_POST_METRICS)
+            if media_type in ("VIDEO", "REEL"):
+                wanted += IG_REEL_EXTRA_METRICS
+            metrics.extend(_fetch_post_insights(post_id, wanted, now, media_type=media_type))
+
+        next_url = payload.get("paging", {}).get("next")
+        if not next_url or page_num >= max_pages:
+            break
+        payload = _get_next_page(next_url)
 
     return posts, metrics
 
@@ -687,9 +725,12 @@ def fetch_instagram_stories() -> tuple[list[SocialPost], list[SocialPostMetric]]
     return posts, metrics
 
 
-def fetch_facebook_posts() -> tuple[list[SocialPost], list[SocialPostMetric]]:
+def fetch_facebook_posts(limit: int = POSTS_PER_PLATFORM_LIMIT, max_pages: int = 1) -> tuple[list[SocialPost], list[SocialPostMetric]]:
     """
     Facebook Page posts. Requires the Page token, same as Page insights.
+
+    Same pagination pattern as fetch_instagram_posts -- max_pages=1 for the
+    regular daily sync, higher for a historical backfill.
 
     Worth the effort despite Facebook being only 6.6% of Instagram's
     follower count: measured against real data, FB delivers ~21-26% of the
@@ -699,30 +740,40 @@ def fetch_facebook_posts() -> tuple[list[SocialPost], list[SocialPostMetric]]:
     now = datetime.now(timezone.utc)
     page_token = get_page_access_token()
 
-    resp = _get(f"{META_PAGE_ID}/posts",
-                {"fields": "id,message,permalink_url,created_time",
-                 "limit": POSTS_PER_PLATFORM_LIMIT},
-                token=page_token)
-
     posts, metrics = [], []
-    for item in resp.get("data", []):
-        post_id = item.get("id")
-        if not post_id:
-            continue
+    page_num = 0
+    payload = _get(f"{META_PAGE_ID}/posts",
+                   {"fields": "id,message,permalink_url,created_time", "limit": limit},
+                   token=page_token)
 
-        posted_at = None
-        if item.get("created_time"):
-            try:
-                posted_at = datetime.fromisoformat(item["created_time"].replace("+0000", "+00:00"))
-            except ValueError:
-                pass
+    while True:
+        page_num += 1
+        page_items = payload.get("data", [])
+        print(f"[meta] Facebook posts, page {page_num}: {len(page_items)} item(s)")
 
-        posts.append(SocialPost(
-            account_id=META_PAGE_ID, post_id=post_id, platform="facebook",
-            media_type="post", caption=item.get("message"),
-            permalink=item.get("permalink_url"), posted_at=posted_at,
-        ))
-        metrics.extend(_fetch_post_insights(post_id, FB_POST_METRICS, now, token=page_token, media_type="FB_POST"))
+        for item in page_items:
+            post_id = item.get("id")
+            if not post_id:
+                continue
+
+            posted_at = None
+            if item.get("created_time"):
+                try:
+                    posted_at = datetime.fromisoformat(item["created_time"].replace("+0000", "+00:00"))
+                except ValueError:
+                    pass
+
+            posts.append(SocialPost(
+                account_id=META_PAGE_ID, post_id=post_id, platform="facebook",
+                media_type="post", caption=item.get("message"),
+                permalink=item.get("permalink_url"), posted_at=posted_at,
+            ))
+            metrics.extend(_fetch_post_insights(post_id, FB_POST_METRICS, now, token=page_token, media_type="FB_POST"))
+
+        next_url = payload.get("paging", {}).get("next")
+        if not next_url or page_num >= max_pages:
+            break
+        payload = _get_next_page(next_url)
 
     return posts, metrics
 
@@ -754,6 +805,50 @@ def sync_posts() -> int:
         written += upsert_rows("social_posts", [p.to_row() for p in all_posts])
     if all_metrics:
         written += upsert_rows("social_post_metrics", [m.to_row() for m in all_metrics])
+    return written
+
+
+def backfill_historical_posts(max_pages: int = 20) -> int:
+    """
+    One-time (or occasional) historical pull -- NOT part of the regular
+    daily sync_posts(). Pages back through older Instagram and Facebook
+    posts via Meta's own pagination cursor, rather than just the most
+    recent POSTS_PER_PLATFORM_LIMIT.
+
+    REAL LIMIT TO EXPECT, not a bug if hit: Instagram media-level insights
+    retain for roughly 2 years. Posts older than that will still be listed
+    (caption/permalink/timestamp), but their per-post METRICS will
+    increasingly come back empty as they age past the window --
+    _fetch_post_insights already isolates that failure per-metric rather
+    than crashing, so this shows up as posts with fewer captured metrics,
+    not a hard stop partway through.
+
+    Stories are deliberately excluded here -- they're gone after 24h with
+    no backfill possible under any circumstances; there's nothing to pull.
+
+    `max_pages` default of 20 (at 25 posts/page = up to 500 posts) is a
+    starting point, not a hard technical ceiling -- raise it if the account
+    has more history than that and rate limits allow.
+    """
+    print(f"[meta] Starting historical backfill (up to {max_pages} pages per platform)...")
+    all_posts, all_metrics = [], []
+
+    for label, fetcher in [("instagram posts", fetch_instagram_posts),
+                           ("facebook posts", fetch_facebook_posts)]:
+        try:
+            posts, metrics = fetcher(max_pages=max_pages)
+            all_posts.extend(posts)
+            all_metrics.extend(metrics)
+            print(f"[meta] {label} backfill: {len(posts)} post(s), {len(metrics)} metric(s)")
+        except Exception as e:
+            print(f"[meta] {label} backfill FAILED (others unaffected): {e}")
+
+    written = 0
+    if all_posts:
+        written += upsert_rows("social_posts", [p.to_row() for p in all_posts])
+    if all_metrics:
+        written += upsert_rows("social_post_metrics", [m.to_row() for m in all_metrics])
+    print(f"[meta] Historical backfill complete: {written} rows written.")
     return written
 
 

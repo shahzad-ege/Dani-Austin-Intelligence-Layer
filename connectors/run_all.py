@@ -38,6 +38,7 @@ import manual_podcast_connector
 
 CONNECTORS = [
     ("quickbooks", qb_connector.run),
+    ("quickbooks_ar_aging", qb_connector.sync_ar_aging),
     ("airtable", airtable_connector.run),
     ("social_blade", social_blade_connector.run),
     ("meta", meta_connector.run),

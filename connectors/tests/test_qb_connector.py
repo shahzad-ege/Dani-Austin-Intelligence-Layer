@@ -299,3 +299,118 @@ def test_account_business_unit_map_loaded_once_not_per_row():
         qb_connector.extract_business_unit({}, {}, {}, "Brand Partnership")
 
     mock_get_client.assert_called_once()
+
+
+# ---------- Accounts Receivable aging ----------
+
+FAKE_OPEN_INVOICE = {
+    "Id": "5001",
+    "TxnDate": "2026-06-15",
+    "DueDate": "2026-09-13",
+    "TotalAmt": 5000.00,
+    "Balance": 5000.00,  # fully unpaid
+    "CustomerRef": {"name": "Stanley"},
+}
+
+FAKE_PARTIALLY_PAID_INVOICE = {
+    "Id": "5002",
+    "TxnDate": "2026-05-01",
+    "DueDate": "2026-06-01",
+    "TotalAmt": 10000.00,
+    "Balance": 3500.00,  # partially paid -- $6500 already collected
+    "CustomerRef": {"name": "Divi"},
+}
+
+FAKE_FULLY_PAID_INVOICE = {
+    "Id": "5003",
+    "TxnDate": "2026-01-01",
+    "DueDate": "2026-02-01",
+    "TotalAmt": 2000.00,
+    "Balance": 0.00,  # fully paid -- no longer part of AR
+    "CustomerRef": {"name": "Old Client"},
+}
+
+
+def test_extract_ar_invoice_captures_header_level_fields():
+    result = qb_connector.extract_ar_invoice(FAKE_OPEN_INVOICE)
+
+    assert result["qb_invoice_id"] == "5001"
+    assert result["customer_name"] == "Stanley"
+    assert result["due_date"] == "2026-09-13"
+    assert result["balance"] == 5000.00
+    assert result["total_amount"] == 5000.00
+
+
+def test_extract_ar_invoice_captures_partial_payment_correctly():
+    """The whole point of tracking Balance separately from TotalAmt --
+    a partially paid invoice must show what's ACTUALLY still owed, not
+    the original invoice total."""
+    result = qb_connector.extract_ar_invoice(FAKE_PARTIALLY_PAID_INVOICE)
+
+    assert result["total_amount"] == 10000.00
+    assert result["balance"] == 3500.00  # NOT 10000 -- $6500 already collected
+
+
+def test_extract_ar_invoice_handles_missing_id():
+    assert qb_connector.extract_ar_invoice({"TxnDate": "2026-01-01"}) is None
+
+
+def test_sync_ar_aging_pulls_all_invoices_not_date_filtered():
+    """AR aging must query ALL invoices (open and closed), NOT apply the
+    90-day rolling window the regular transaction sync uses -- a 2-year-old
+    unpaid invoice is exactly as relevant to current AR as a recent one."""
+    with patch("qb_connector.refresh_access_token", return_value="fake_token"), \
+         patch("qb_connector.qb_query") as mock_query, \
+         patch("qb_connector.upsert_rows") as mock_upsert:
+
+        mock_query.return_value = [FAKE_OPEN_INVOICE, FAKE_PARTIALLY_PAID_INVOICE, FAKE_FULLY_PAID_INVOICE]
+        mock_upsert.return_value = 3
+
+        count = qb_connector.sync_ar_aging()
+
+        # Confirm the query has NO date filter (unlike the transaction sync)
+        called_query = mock_query.call_args[0][1]
+        assert "WHERE" not in called_query
+        assert "Invoice" in called_query
+
+        assert count == 3
+        written_rows = mock_upsert.call_args[0][1]
+        assert len(written_rows) == 3
+        # The fully-paid invoice is still WRITTEN (for historical record),
+        # just correctly shows balance=0 -- filtering to "open only" happens
+        # in the SQL views (da_ar_current_position etc.), not by dropping
+        # rows here.
+        paid = next(r for r in written_rows if r["qb_invoice_id"] == "5003")
+        assert paid["balance"] == 0.00
+
+
+# ---------- Daily snapshot + settlement tracking ----------
+
+def test_sync_ar_aging_writes_both_current_state_and_snapshot():
+    """The core fix: every sync must write to BOTH tables -- the upsert
+    table (current state) AND the append-only snapshot (history), or
+    settlement detection has nothing to compare against."""
+    with patch("qb_connector.refresh_access_token", return_value="fake_token"), \
+         patch("qb_connector.qb_query", return_value=[FAKE_OPEN_INVOICE]), \
+         patch("qb_connector.upsert_rows") as mock_upsert:
+
+        mock_upsert.return_value = 1
+        qb_connector.sync_ar_aging()
+
+        tables_written = [call.args[0] for call in mock_upsert.call_args_list]
+        assert "qb_da_invoices" in tables_written
+        assert "qb_da_invoices_daily_snapshot" in tables_written
+
+
+def test_snapshot_rows_include_balance_for_settlement_comparison():
+    with patch("qb_connector.refresh_access_token", return_value="fake_token"), \
+         patch("qb_connector.qb_query", return_value=[FAKE_OPEN_INVOICE]), \
+         patch("qb_connector.upsert_rows") as mock_upsert:
+
+        mock_upsert.return_value = 1
+        qb_connector.sync_ar_aging()
+
+        snapshot_call = next(c for c in mock_upsert.call_args_list if c.args[0] == "qb_da_invoices_daily_snapshot")
+        snapshot_rows = snapshot_call.args[1]
+        assert snapshot_rows[0]["qb_invoice_id"] == "5001"
+        assert snapshot_rows[0]["balance"] == 5000.00
