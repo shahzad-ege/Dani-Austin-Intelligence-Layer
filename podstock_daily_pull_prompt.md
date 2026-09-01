@@ -37,6 +37,11 @@ date at the top.
 - Platform split percentages (Spotify Streams / Downloads / YouTube Views)
 - The single top-performing recent episode: its title and total delivery
   number
+- (Deliberately NOT pulling the full paginated episode-by-episode list —
+  Podstock's per-episode records have a known duplicate-entry issue, so
+  only the aggregate stats above and the one top episode are captured.
+  If a genuinely complete episode-level pull is wanted later, that needs
+  its own separate prompt and its own downstream table, not this one.)
 
 ### 3. Channels section
 - Total followers (with % change)
@@ -45,14 +50,20 @@ date at the top.
 - Number of active channel connections
 
 ### 4. Schedule section
-- List any ad-slot bookings visible for the NEXT 30 days only (not the
-  full calendar) — brand name, slot type (Host Read / Custom Segment /
-  etc.), and whether it's booked or still "Available"
+- List EVERY ad-slot booking visible for the NEXT 30 days (not the full
+  calendar) — brand name, slot type (Host Read / Custom Segment / etc.),
+  and whether it's booked or still "Available". If the booking list spans
+  multiple pages within that 30-day window, page through ALL of them —
+  do not stop at the first page and assume that's the complete list.
 
 ### 5. Audience section
-- Age breakdown (all age brackets shown, with % of total delivery each)
+- Age breakdown (ALL age brackets shown, with % of total delivery each)
 - Gender breakdown
-- Country breakdown (all countries shown, with % each)
+- Country breakdown (ALL countries shown, with % each) — country lists in
+  particular tend to have a long tail and are often paginated or require
+  scrolling/"show more" to reveal every entry. Page through or expand
+  the full list before recording this section as complete; a truncated
+  top-10-only country list is NOT acceptable.
 
 ## Output format
 
@@ -96,18 +107,25 @@ Total followers: [number] ([%change])
   YouTube: [number] ([%change])
 Active connections: [number]
 
-SCHEDULE (next 30 days)
+SCHEDULE (next 30 days — ALL bookings across ALL pages)
 [Brand] — [slot type] — [Booked/Available] — [date if shown]
-[repeat per booking]
+[repeat per booking, every page]
 
 AUDIENCE
-Age: [bracket]: [%], [bracket]: [%], ...
+Age: [bracket]: [%], [bracket]: [%], ... (all brackets)
 Gender: Female [%], Male [%]
-Country: [country]: [%], [country]: [%], ...
+Country: [country]: [%], [country]: [%], ... (ALL countries shown across every page/scroll, not just the top ones)
 ```
 
 ## Critical instructions
 
+- **Before recording ANY section as complete, check for pagination** —
+  numbered pages, a "Next" button, "Load more," or infinite scroll. If
+  present, page through or scroll to the true end of that section's data
+  BEFORE moving to the next section. A section is only "done" when there
+  are no more pages/results left to load, not when the first screen looks
+  full. This applies to every section above, not just the ones that
+  explicitly call it out.
 - If ANY section fails to load or a login/CAPTCHA/session-expired screen
   appears, STOP immediately and report exactly what you see — do not
   attempt to log in, solve a CAPTCHA, or guess at values.
@@ -116,5 +134,6 @@ Country: [country]: [%], [country]: [%], ...
 - Do not editorialize, summarize trends, or add commentary — output the
   structured data block only. Analysis happens downstream, not here.
 - If Podstock's dashboard layout has visibly changed since this prompt was
-  written (different section names, moved elements), report the new
-  layout you see rather than forcing the old structure onto it.
+  written (different section names, moved elements, pagination style
+  changed), report the new layout you see rather than forcing the old
+  structure onto it.

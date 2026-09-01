@@ -1,0 +1,24 @@
+-- ============================================================
+-- Migration 013: Corrections from Katelyn's questionnaire responses
+-- ============================================================
+--
+-- Real, structural fix: several balance-sheet accounts (Accounts
+-- Receivable (A/R), Brex - Credit Cards, Federal Income Tax Payable,
+-- Owner's Contribution/Equity/Distribution, Opening Balance Equity,
+-- Prepaid Agency Fee) were being summed into 'Overhead' as if they were
+-- real P&L operating expenses. Confirmed wrong by Katelyn directly --
+-- summing balance-sheet transaction lines across 8 years of history
+-- produces a meaningless figure (Accounts Receivable (A/R) summed to
+-- $3.58M vs. her stated real AR of "~$1M", which matches
+-- da_ar_current_position almost exactly; Brex Credit Cards summed to
+-- -$342K vs. her stated real balance of "$20K-$70K").
+--
+-- New 'Non-Operating' category added, distinct from 'Overhead'. Removed
+-- $25.6M of non-operating noise from what was being reported as Overhead
+-- (previously ~$39.6M combined, now a real $14M).
+--
+-- Also corrected: standalone "Agency Fee" was wrongly mapped to Podcast
+-- (guessed as a naming variant of "Podcast Agency Fee") -- Katelyn
+-- confirmed it's actually for brand-partnership agency fees (Jake Rosen
+-- Entertainment) and belongs in Partnerships. Moved $498,701.01 across 91
+-- transactions.

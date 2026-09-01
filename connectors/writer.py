@@ -28,6 +28,11 @@ CONFLICT_KEYS = {
     "social_posts": "account_id,post_id",
     "social_post_metrics": "post_id,metric,fetched_at",
     "podcast_metrics": "show_id,platform,metric,period_date",
+    "affiliate_commission_deals": "brand,month",
+    "da_cash_flow_recurring_assumptions": "line_item",
+    "podcast_audience_demographics": "show_id,dimension,dimension_value,period_date",
+    "podcast_ad_bookings": "show_id,episode_air_date,slot_type,pulled_at",
+    "podcast_top_episode_snapshots": "show_id,pulled_at",
     "da_entity_summary": "month,metric",
 }
 

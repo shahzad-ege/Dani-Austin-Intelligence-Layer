@@ -36,11 +36,14 @@ class AirtablePartnership:
     status: str
     deliverable_platform: Optional[str]
     client: Optional[str]
-    is_repeat: Optional[bool]
+    is_repeat: Optional[bool]  # ALWAYS None -- no real field for this exists in the actual base, confirmed against the real schema. Kept for schema stability, not removed.
     gross_amt: Optional[float]
     net_amt: Optional[float]
     month_committed: Optional[date]
     month_completed: Optional[date]
+    in_qbo: Optional[bool] = None  # real field, discovered in the actual base: explicit signal for QuickBooks reconciliation
+    invoice_status: Optional[str] = None
+    agreement_status: Optional[str] = None
 
     def to_row(self) -> dict:
         row = asdict(self)
