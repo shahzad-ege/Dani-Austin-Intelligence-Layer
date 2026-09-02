@@ -297,11 +297,11 @@ IG_INSIGHT_METRICS = [
 # The metrics below are all accepted by the live API. An earlier run
 # returned EMPTY for all of them, and this file previously concluded the
 # Page was likely dormant -- Jordan has since confirmed the Page IS
-# actually active, which means that conclusion was probably wrong. Under
-# investigation: since/until format (Unix timestamp -> date string, just
-# changed) and full raw-payload logging have been added to
-# _fetch_metrics_resilient to get a definitive answer rather than guess
-# further. Do not re-assume "dormant" until that's actually ruled out.
+# RESOLVED (Sep 2026, via DA_Data_Scrub_Report): page_total_actions is
+# confirmed deprecated, not dormant/under-investigation as previously
+# thought -- all 14 stored rows were exactly 0, and Meta no longer
+# returns real data for this field. Removed from the list below rather
+# than continuing to store a metric with no live value.
 FB_INSIGHT_METRICS = [
     "page_follows",
     "page_post_engagements",
@@ -309,7 +309,6 @@ FB_INSIGHT_METRICS = [
     "page_daily_follows_unique",
     "page_video_views",
     "page_media_view",
-    "page_total_actions",
 ]
 
 
@@ -343,6 +342,17 @@ def fetch_facebook_metrics() -> list[SocialMetric]:
     today = date.today()
     records = []
 
+    # CANONICAL follower count for Facebook -- direct profile field, same
+    # pattern already established for Instagram (see fetch_instagram_metrics:
+    # followers_count was removed from /insights, so the direct field is the
+    # only reliable source there too). This is the field to use for "current
+    # followers" -- confirmed via DA_Data_Scrub_Report that this and
+    # page_follows (an Insights-API metric, fetched via a separate periodic
+    # system below) can disagree by small amounts on the same day. They are
+    # NOT interchangeable: this field is the real-time account state;
+    # page_follows is a distinct Insights metric with its own lag/semantics.
+    # Stored under a different metric name ("followers" vs "page_follows")
+    # specifically so downstream queries can't accidentally conflate them.
     profile = _get(META_PAGE_ID, {"fields": "followers_count"})
     if "followers_count" in profile:
         records.append(SocialMetric(META_PAGE_ID, "followers", today, float(profile["followers_count"])))
@@ -455,6 +465,124 @@ def fetch_instagram_demographics() -> list[SocialDemographic]:
 
         if not found_any:
             print(f"[meta]   demographics '{dimension}': no data returned. Raw payload: {payload}")
+
+    return records
+
+
+# Facebook Page audience demographics -- BUG-2 from Meta_API_Bug_Report,
+# confirmed working via a real live diagnostic run (diagnose_facebook_
+# demographics.py), not guessed at. Real findings from that process,
+# each one confirmed rather than assumed:
+#
+# 1. page_fans_gender_age and page_fans_locale are genuinely, permanently
+#    gone -- confirmed rejected with "(#100) invalid metric" on every
+#    attempt. Meta's own changelog confirms age/gender was restricted for
+#    privacy reasons (Mar 2024) with no replacement metric offered at
+#    all. Do not re-attempt these; they are not coming back.
+#
+# 2. page_fans_city / page_fans_country DO have real replacements --
+#    page_follows_city / page_follows_country -- confirmed valid,
+#    non-rejected metric names. But requesting them with period=lifetime
+#    (the shape the OLD page_fans_city used) returned empty even across
+#    a 60-day explicit range. The metric's own pagination behavior
+#    (repeatedly windowing into narrow ~2-day chunks regardless of the
+#    requested range) was the tell that this is a genuine day-level
+#    time-series metric under the hood, not a lifetime-cumulative one.
+#
+# 3. period=day is the correct shape -- confirmed via real populated
+#    data: 44 real cities returned on the first successful call.
+#
+# 4. The values themselves are CUMULATIVE totals-to-date per day, not
+#    incremental daily deltas -- inferred from the same city count
+#    (e.g. "New York, NY": 571) repeating identically across consecutive
+#    days in the real response. A real daily NEW-follower count of 571
+#    for one city in one day would be implausible for this Page's size;
+#    a running total that only occasionally moves is exactly what you'd
+#    expect instead. Each day is treated as a snapshot of the total as
+#    of that day, matching how every other point-in-time metric in this
+#    project is already stored (followers, page_follows).
+#
+# Only city and country are attempted here. gender_age and locale are
+# deliberately excluded -- confirmed dead, not silently retried.
+FB_DEMOGRAPHIC_METRICS = {
+    "city": "page_follows_city",
+    "country": "page_follows_country",
+}
+
+
+def fetch_facebook_demographics(days_back: int = 30) -> list[SocialDemographic]:
+    """
+    Fetches Facebook Page audience demographics (city, country) using the
+    CONFIRMED real request shape: period=day, not period=lifetime -- the
+    latter was tested directly and returns empty regardless of date range,
+    even though the metric name itself is valid.
+
+    Each dimension is requested separately and failures are isolated per
+    dimension, same reasoning as fetch_instagram_demographics: an
+    unavailable dimension shouldn't cost us the other one.
+    """
+    import time
+
+    # CRITICAL, caught by an existing test's strict assertion on Page
+    # Insights call count -- this function initially called _get() without
+    # an explicit token, silently defaulting to the System User token via
+    # _get's own fallback. Facebook Page Insights specifically requires a
+    # PAGE access token (see _get's docstring) -- the System User token
+    # would have failed against the real API with a (#190) error despite
+    # every test in isolation passing, since those tests patched _get
+    # directly and never exercised the token-selection path at all. Fixed
+    # to match fetch_facebook_metrics' already-correct pattern exactly.
+    page_token = get_page_access_token()
+
+    until_ts = int(time.time())
+    since_ts = until_ts - (days_back * 86400)
+    records: list[SocialDemographic] = []
+
+    for dimension, sb_metric in FB_DEMOGRAPHIC_METRICS.items():
+        try:
+            payload = _get(
+                f"{META_PAGE_ID}/insights",
+                {
+                    "metric": sb_metric,
+                    "period": "day",
+                    "since": since_ts,
+                    "until": until_ts,
+                },
+                token=page_token,
+            )
+        except requests.HTTPError:
+            print(f"[meta]   FB demographics '{dimension}': REJECTED by API -- skipping.")
+            continue
+
+        found_any = False
+        for item in payload.get("data", []):
+            for value_entry in item.get("values", []):
+                end_time = value_entry.get("end_time")
+                value_dict = value_entry.get("value")
+                if not end_time or not isinstance(value_dict, dict):
+                    continue
+                try:
+                    entry_date = datetime.fromisoformat(end_time.replace("Z", "+00:00")).date()
+                except ValueError:
+                    print(f"[meta]   FB demographics '{dimension}': unparseable end_time {end_time!r} -- skipping this entry")
+                    continue
+
+                for location_name, count in value_dict.items():
+                    if count is None:
+                        continue
+                    records.append(
+                        SocialDemographic(
+                            account_id=META_PAGE_ID,
+                            dimension=dimension,
+                            dimension_value=location_name,
+                            value=float(count),
+                            period_date=entry_date,
+                        )
+                    )
+                    found_any = True
+
+        if not found_any:
+            print(f"[meta]   FB demographics '{dimension}': no data returned. Raw payload: {payload}")
 
     return records
 
@@ -861,6 +989,12 @@ def run() -> int:
     # differently-shaped request (breakdown parameter, nested response) and
     # untested against a real account, so a failure here must not cost us
     # the core metrics that are already known to work.
+    # Demographics are isolated from the main metrics write: a failure
+    # here must not cost us the core metrics that are already known to
+    # work. Instagram's shape has been stable in production; Facebook's
+    # (added Sep 2026) is newly confirmed but still isolated the same way
+    # out of caution, given how much iteration it took to find the real
+    # working request shape (period=day, not lifetime).
     try:
         demographics = fetch_instagram_demographics()
         if demographics:
@@ -872,6 +1006,18 @@ def run() -> int:
             print("[meta] No audience demographic rows returned.")
     except Exception as e:
         print(f"[meta] Demographics fetch failed (core metrics unaffected): {e}")
+
+    try:
+        fb_demographics = fetch_facebook_demographics()
+        if fb_demographics:
+            fb_demo_written = upsert_rows(
+                "social_audience_demographics", [d.to_row() for d in fb_demographics]
+            )
+            print(f"[meta] Wrote {fb_demo_written} Facebook audience demographic rows.")
+        else:
+            print("[meta] No Facebook audience demographic rows returned.")
+    except Exception as e:
+        print(f"[meta] Facebook demographics fetch failed (core metrics unaffected): {e}")
 
     return written
 

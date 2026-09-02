@@ -5,6 +5,7 @@ parsing logic against fake API responses. No real network/database calls.
 
 import os
 import sys
+import requests
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -222,12 +223,19 @@ def test_meta_run_parses_ig_and_fb_metrics():
 
         # Critical: Page Insights MUST be called with the Page token, not
         # the System User token -- Meta rejects the latter with a (#190).
+        # Updated count from 1 -> 3 (Sep 2026): fetch_facebook_demographics
+        # legitimately adds 2 more Page Insights calls (city + country).
+        # Strengthened rather than just relaxed: every one of the 3 calls
+        # is checked individually, not just the first -- this is exactly
+        # the assertion that caught fetch_facebook_demographics initially
+        # shipping without the page token at all.
         page_insights_calls = [
             c for c in mock_get.call_args_list
             if "insights" in c[0][0] and "test_page_id" in c[0][0]
         ]
-        assert len(page_insights_calls) == 1
-        assert page_insights_calls[0][1]["params"]["access_token"] == "fake_page_token_xyz"
+        assert len(page_insights_calls) == 3
+        for call in page_insights_calls:
+            assert call[1]["params"]["access_token"] == "fake_page_token_xyz"
 
 
 # ---------- TikTok ----------
@@ -371,3 +379,210 @@ def test_batch_response_flags_silently_omitted_metrics(capsys):
     output = capsys.readouterr().out
     assert "silently omitted" in output
     assert "follows_and_unfollows" in output
+
+
+# ---------- Social Blade daily-history backfill ----------
+
+def test_backfill_uses_daily_array_not_just_totals():
+    """The core fix: Social Blade already returns a daily[] array with real
+    history in every statistics call, which the regular run() discarded
+    entirely except today's single point. This confirms the backfill
+    actually parses and writes multiple real historical days, not just
+    one."""
+    real_shaped_payload = {
+        "data": {
+            "daily": [
+                {"date": "2026-08-11T00:00:00.000Z", "followers": 1100000, "likes": 43100000, "uploads": 1761},
+                {"date": "2026-08-12T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1761},
+            ]
+        }
+    }
+    tiktok_only = [a for a in social_blade_connector.SEED_ACCOUNTS if a.platform == "tiktok"]
+
+    with patch("social_blade_connector.SEED_ACCOUNTS", tiktok_only), \
+         patch("social_blade_connector.fetch_statistics", return_value=real_shaped_payload), \
+         patch("social_blade_connector.upsert_rows") as mock_upsert:
+        mock_upsert.return_value = 6
+        count = social_blade_connector.backfill_from_daily_history()
+
+    rows = mock_upsert.call_args_list[0].args[1]
+    dates_written = {r["period_date"] for r in rows}
+    assert "2026-08-11" in dates_written
+    assert "2026-08-12" in dates_written  # confirms MULTIPLE real days written, not just one
+
+
+def test_backfill_preserves_real_day_to_day_value_changes():
+    """Confirms a genuine value change across two real days (43.1M -> 43.2M
+    likes, matching values actually seen in a live diagnostic run) is
+    captured correctly, not collapsed to a single repeated value."""
+    real_shaped_payload = {
+        "data": {
+            "daily": [
+                {"date": "2026-08-11T00:00:00.000Z", "followers": 1100000, "likes": 43100000, "uploads": 1761},
+                {"date": "2026-08-12T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1761},
+            ]
+        }
+    }
+    tiktok_only = [a for a in social_blade_connector.SEED_ACCOUNTS if a.platform == "tiktok"]
+
+    with patch("social_blade_connector.SEED_ACCOUNTS", tiktok_only), \
+         patch("social_blade_connector.fetch_statistics", return_value=real_shaped_payload), \
+         patch("social_blade_connector.upsert_rows") as mock_upsert:
+        mock_upsert.return_value = 6
+        social_blade_connector.backfill_from_daily_history()
+
+    rows = mock_upsert.call_args_list[0].args[1]
+    likes_11 = next(r["value"] for r in rows if r["period_date"] == "2026-08-11" and r["metric"] == "likes")
+    likes_12 = next(r["value"] for r in rows if r["period_date"] == "2026-08-12" and r["metric"] == "likes")
+    assert likes_11 == 43100000.0
+    assert likes_12 == 43200000.0
+    assert likes_11 != likes_12  # the actual point: real movement is preserved, not flattened
+
+
+def test_backfill_isolates_platform_with_missing_daily_array():
+    """If one platform's response has no daily[] (unconfirmed shape for
+    IG/FB, only TikTok's real structure has been directly verified), that
+    platform is skipped with a clear message -- it must not crash the
+    whole backfill or silently write nothing for every platform."""
+    def fake_fetch(platform, handle):
+        if platform == "tiktok":
+            return {"data": {"daily": [{"date": "2026-08-12T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1761}]}}
+        return {"data": {}}  # no daily[] key at all -- simulates an unconfirmed/different shape
+
+    with patch("social_blade_connector.fetch_statistics", side_effect=fake_fetch), \
+         patch("social_blade_connector.upsert_rows") as mock_upsert:
+        mock_upsert.return_value = 3
+        count = social_blade_connector.backfill_from_daily_history()
+
+    assert count > 0  # tiktok's real data still got written
+    written_tables = [c.args[0] for c in mock_upsert.call_args_list]
+    assert written_tables.count("social_metrics") == 1  # only one platform actually had data to write
+
+
+def test_backfill_respects_max_days_limit():
+    """max_days lets a caller cap how far back to backfill, rather than
+    always writing the full ~30 days Social Blade returns."""
+    real_shaped_payload = {
+        "data": {
+            "daily": [
+                {"date": "2026-09-02T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1770},
+                {"date": "2026-09-01T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1768},
+                {"date": "2026-08-31T00:00:00.000Z", "followers": 1100000, "likes": 43200000, "uploads": 1768},
+            ]
+        }
+    }
+    tiktok_only = [a for a in social_blade_connector.SEED_ACCOUNTS if a.platform == "tiktok"]
+
+    with patch("social_blade_connector.SEED_ACCOUNTS", tiktok_only), \
+         patch("social_blade_connector.fetch_statistics", return_value=real_shaped_payload), \
+         patch("social_blade_connector.upsert_rows") as mock_upsert:
+        mock_upsert.return_value = 3
+        social_blade_connector.backfill_from_daily_history(max_days=1)
+
+    rows = mock_upsert.call_args_list[0].args[1]
+    dates_written = {r["period_date"] for r in rows}
+    assert dates_written == {"2026-09-02"}  # only the single most recent day
+
+
+# ---------- Facebook demographics (BUG-2, confirmed real shape) ----------
+
+def test_fetch_facebook_demographics_parses_real_confirmed_shape():
+    """Built directly against a real diagnostic run's output, not a
+    guessed shape. period=day (not lifetime) returns city/country as a
+    flat {location: count} dict per day, under 'end_time' -- confirmed
+    live against the real Facebook API."""
+    def fake_get(path, params, token=None):
+        if params.get("period") != "day":
+            raise AssertionError("period=lifetime was confirmed empty in production -- must use period=day")
+        if params.get("metric") == "page_follows_city":
+            return {"data": [{"values": [
+                {"value": {"New York, NY": 571, "Houston, TX": 544}, "end_time": "2026-07-06T07:00:00+0000"},
+            ]}]}
+        elif params.get("metric") == "page_follows_country":
+            return {"data": [{"values": [
+                {"value": {"US": 5000, "EG": 200}, "end_time": "2026-07-06T07:00:00+0000"},
+            ]}]}
+        return {"data": []}
+
+    with patch("meta_connector._get", side_effect=fake_get):
+        records = meta_connector.fetch_facebook_demographics(days_back=30)
+
+    city = [r for r in records if r.dimension == "city"]
+    country = [r for r in records if r.dimension == "country"]
+    assert len(city) == 2
+    assert len(country) == 2
+    assert any(r.dimension_value == "New York, NY" and r.value == 571.0 for r in city)
+    assert any(r.dimension_value == "US" and r.value == 5000.0 for r in country)
+
+
+def test_facebook_demographics_cumulative_value_preserved_across_days():
+    """Real confirmed finding: the same city's count repeating across
+    consecutive days in production means these are cumulative
+    totals-to-date, not daily deltas. Confirms a repeated real value is
+    stored once per real date, not collapsed or misinterpreted."""
+    def fake_get(path, params, token=None):
+        if params.get("metric") == "page_follows_city":
+            return {"data": [{"values": [
+                {"value": {"New York, NY": 571}, "end_time": "2026-07-06T07:00:00+0000"},
+                {"value": {"New York, NY": 571}, "end_time": "2026-07-07T07:00:00+0000"},
+            ]}]}
+        return {"data": []}
+
+    with patch("meta_connector._get", side_effect=fake_get):
+        records = meta_connector.fetch_facebook_demographics(days_back=30)
+
+    ny = [(r.period_date, r.value) for r in records if r.dimension_value == "New York, NY"]
+    assert len(ny) == 2
+    assert ny[0][1] == ny[1][1] == 571.0
+
+
+def test_facebook_demographics_gender_age_and_locale_never_attempted():
+    """confirmed dead (403/invalid metric on every real attempt) --
+    the real fetch function must not waste a call retrying them."""
+    calls_made = []
+
+    def fake_get(path, params, token=None):
+        calls_made.append(params.get("metric"))
+        return {"data": []}
+
+    with patch("meta_connector._get", side_effect=fake_get):
+        meta_connector.fetch_facebook_demographics(days_back=30)
+
+    assert "page_fans_gender_age" not in calls_made
+    assert "page_fans_locale" not in calls_made
+    assert set(calls_made) == {"page_follows_city", "page_follows_country"}
+
+
+def test_facebook_demographics_isolates_a_rejected_dimension():
+    """If country gets rejected in the future (scope change, further
+    deprecation), city must still be written -- same isolation principle
+    used everywhere else in this connector."""
+    def fake_get(path, params, token=None):
+        if params.get("metric") == "page_follows_country":
+            raise requests.HTTPError("rejected")
+        return {"data": [{"values": [
+            {"value": {"New York, NY": 571}, "end_time": "2026-07-06T07:00:00+0000"},
+        ]}]}
+
+    with patch("meta_connector._get", side_effect=fake_get):
+        records = meta_connector.fetch_facebook_demographics(days_back=30)
+
+    assert len(records) == 1
+    assert records[0].dimension == "city"
+
+
+def test_facebook_demographics_uses_page_token_not_system_token():
+    """Guards against the exact real bug this function shipped with
+    initially: calling _get() without an explicit token silently
+    defaults to the System User token, which Facebook Page Insights
+    rejects with a (#190) error in production. Only caught because an
+    existing test asserted on Page Insights call count at the requests.get
+    level -- this test asserts on the token explicitly, at the level that
+    actually matters, so this class of bug can't silently reappear."""
+    with patch("meta_connector.get_page_access_token", return_value="THE_REAL_PAGE_TOKEN") as mock_token, \
+         patch("meta_connector._get", return_value={"data": []}) as mock_get:
+        meta_connector.fetch_facebook_demographics(days_back=30)
+
+    assert mock_token.called
+    for call in mock_get.call_args_list:
+        assert call.kwargs.get("token") == "THE_REAL_PAGE_TOKEN"

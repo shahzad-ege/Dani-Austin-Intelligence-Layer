@@ -35,7 +35,7 @@ Dani Austin handles before the first sync.
 
 import os
 import requests
-from datetime import date
+from datetime import date, datetime
 
 from models import SocialAccount, SocialMetric
 from writer import upsert_rows
@@ -95,6 +95,85 @@ def fetch_statistics(platform: str, handle: str) -> dict:
         print(f"[social_blade] WARNING: only {credits_left} credits remaining.")
 
     return payload
+
+
+def backfill_from_daily_history(max_days: int | None = None) -> int:
+    """
+    Uses the `daily` array Social Blade ALREADY returns in the same
+    statistics call `run()` makes -- confirmed via direct diagnostic
+    (diagnose_tiktok_social_blade.py) to contain up to ~30 days of real
+    daily history per call, at NO extra API cost or credit spend. The
+    regular run() was discarding all of this except today's single point.
+
+    CONFIRMED working shape for TikTok specifically (real payload
+    inspected directly): each entry in data.daily[] has the same field
+    names as data.statistics.total (followers, following, uploads,
+    likes), one entry per date. Instagram/Facebook's daily array shape
+    is UNCONFIRMED -- this function is written generically to attempt
+    the same parsing for all platforms via the existing FIELD_MAP, but
+    isolates failures per-platform so an unconfirmed/different shape on
+    IG or FB can't crash the whole backfill or silently corrupt TikTok's
+    known-good data.
+
+    This is what actually resolved the original "TikTok values look
+    static" question: the same diagnostic that raised this concern showed
+    `following` and `uploads` genuinely incrementing day to day in this
+    same daily[] array, proving the connector pulls fresh data daily.
+    `followers` specifically staying at a flat 1,100,000 is best explained
+    by TikTok/Social Blade rounding large follower counts for display,
+    not a caching bug -- confirmed by the OTHER fields moving in the same
+    response, not assumed.
+    """
+    total_written = 0
+
+    for account in SEED_ACCOUNTS:
+        try:
+            stats = fetch_statistics(account.platform, account.handle)
+        except requests.HTTPError as e:
+            print(f"[social_blade] backfill: '{account.platform}' handle '{account.handle}' FAILED: {e}")
+            continue
+
+        daily_entries = stats.get("data", {}).get("daily", [])
+        if not daily_entries:
+            print(f"[social_blade] backfill: '{account.platform}' returned no daily[] array -- skipping")
+            continue
+
+        if max_days is not None:
+            daily_entries = daily_entries[:max_days]
+
+        field_map = FIELD_MAP.get(account.platform, {})
+        records: list[SocialMetric] = []
+
+        for entry in daily_entries:
+            raw_date = entry.get("date")
+            if not raw_date:
+                continue
+            try:
+                entry_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).date()
+            except ValueError:
+                print(f"[social_blade] backfill: unparseable date {raw_date!r} for '{account.platform}' -- skipping this entry")
+                continue
+
+            for our_metric, sb_field in field_map.items():
+                value = entry.get(sb_field)
+                if value is None:
+                    continue
+                records.append(
+                    SocialMetric(
+                        account_id=account.account_id,
+                        metric=our_metric,
+                        period_date=entry_date,
+                        value=float(value),
+                        source="social_blade",
+                    )
+                )
+
+        if records:
+            written = upsert_rows("social_metrics", [r.to_row() for r in records])
+            total_written += written
+            print(f"[social_blade] backfill: '{account.platform}' -- {len(daily_entries)} day(s), {written} row(s) written")
+
+    return total_written
 
 
 def run() -> int:
