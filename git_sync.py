@@ -30,6 +30,25 @@ def run(cmd: list[str], check: bool = True) -> str:
     return result.stdout.strip()
 
 
+def run_interactive(cmd: list[str]) -> None:
+    """
+    For commands that may need to prompt for credentials (push, pull) --
+    does NOT capture output. This is the actual fix for a real bug: the
+    original version used capture_output=True for every command, including
+    push. That redirects stdin/stdout/stderr through Python instead of the
+    real terminal, so when git needed to show a credential prompt (e.g. a
+    Git Credential Manager popup, or a username/token prompt), it had
+    nowhere to display it and failed with a cryptic
+    "/dev/tty: No such device or address" error -- even though the commit
+    itself had already succeeded. Letting git talk directly to the real
+    terminal fixes this.
+    """
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"[git_sync] Command failed: {' '.join(cmd)}")
+        sys.exit(1)
+
+
 def get_repo_root() -> str:
     return run(["git", "rev-parse", "--show-toplevel"])
 
@@ -92,7 +111,7 @@ def push() -> None:
 
     run(["git", "add", "."])
     run(["git", "commit", "-m", message])
-    run(["git", "push"])
+    run_interactive(["git", "push"])
     print("\n[git_sync] Pushed successfully.")
 
 
@@ -108,8 +127,7 @@ def pull() -> None:
             print("[git_sync] Cancelled.")
             return
 
-    output = run(["git", "pull"])
-    print(output)
+    run_interactive(["git", "pull"])
 
 
 if __name__ == "__main__":

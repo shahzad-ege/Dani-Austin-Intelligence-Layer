@@ -504,7 +504,8 @@ def test_fetch_facebook_demographics_parses_real_confirmed_shape():
             ]}]}
         return {"data": []}
 
-    with patch("meta_connector._get", side_effect=fake_get):
+    with patch("meta_connector.get_page_access_token", return_value="fake_token"), \
+         patch("meta_connector._get", side_effect=fake_get):
         records = meta_connector.fetch_facebook_demographics(days_back=30)
 
     city = [r for r in records if r.dimension == "city"]
@@ -528,7 +529,8 @@ def test_facebook_demographics_cumulative_value_preserved_across_days():
             ]}]}
         return {"data": []}
 
-    with patch("meta_connector._get", side_effect=fake_get):
+    with patch("meta_connector.get_page_access_token", return_value="fake_token"), \
+         patch("meta_connector._get", side_effect=fake_get):
         records = meta_connector.fetch_facebook_demographics(days_back=30)
 
     ny = [(r.period_date, r.value) for r in records if r.dimension_value == "New York, NY"]
@@ -545,7 +547,8 @@ def test_facebook_demographics_gender_age_and_locale_never_attempted():
         calls_made.append(params.get("metric"))
         return {"data": []}
 
-    with patch("meta_connector._get", side_effect=fake_get):
+    with patch("meta_connector.get_page_access_token", return_value="fake_token"), \
+         patch("meta_connector._get", side_effect=fake_get):
         meta_connector.fetch_facebook_demographics(days_back=30)
 
     assert "page_fans_gender_age" not in calls_made
@@ -564,7 +567,8 @@ def test_facebook_demographics_isolates_a_rejected_dimension():
             {"value": {"New York, NY": 571}, "end_time": "2026-07-06T07:00:00+0000"},
         ]}]}
 
-    with patch("meta_connector._get", side_effect=fake_get):
+    with patch("meta_connector.get_page_access_token", return_value="fake_token"), \
+         patch("meta_connector._get", side_effect=fake_get):
         records = meta_connector.fetch_facebook_demographics(days_back=30)
 
     assert len(records) == 1

@@ -562,7 +562,20 @@ def fetch_facebook_demographics(days_back: int = 30) -> list[SocialDemographic]:
                 if not end_time or not isinstance(value_dict, dict):
                     continue
                 try:
-                    entry_date = datetime.fromisoformat(end_time.replace("Z", "+00:00")).date()
+                    # REAL BUG, confirmed against a live run on Shahzad's
+                    # machine (Python 3.10): Facebook returns end_time as
+                    # e.g. "2026-08-05T07:00:00+0000" -- no colon in the
+                    # offset. datetime.fromisoformat() accepts this on
+                    # Python 3.11+ but REJECTS it on 3.10 with a
+                    # ValueError. My own tests passed because this
+                    # sandbox runs 3.12 -- a real gap between test and
+                    # deployment environments that hid this completely.
+                    # Fix: don't parse a timezone-aware datetime at all --
+                    # only the DATE is ever needed here, and the first 10
+                    # characters of any ISO-8601-like string are always
+                    # YYYY-MM-DD regardless of what the offset looks like
+                    # or which Python version is running.
+                    entry_date = date.fromisoformat(end_time[:10])
                 except ValueError:
                     print(f"[meta]   FB demographics '{dimension}': unparseable end_time {end_time!r} -- skipping this entry")
                     continue

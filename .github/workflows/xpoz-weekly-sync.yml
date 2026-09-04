@@ -1,0 +1,52 @@
+name: Xpoz Weekly Sync
+
+# Runs SEPARATELY from daily-sync.yml, once a week -- deliberately NOT
+# in run_all.py's daily CONNECTORS list.
+#
+# WHY WEEKLY, not daily: real budget math, confirmed. At 1000 results
+# per platform (the requested depth), a single run uses 4,000 of the
+# 100,000/month free-tier cap. Daily would need scaling back to
+# 800/platform to fit (~96,000/month, a thin buffer). Weekly at the
+# full 1000/platform costs ~17,320-20,000/month depending on how many
+# times the scheduled weekday lands in a given month -- landing at
+# ~17-20% of the monthly cap, matching the requested "keep usage to
+# ~20%" target while keeping full search depth.
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # 06:00 UTC every Monday
+  workflow_dispatch: {}  # allows manual "Run workflow" from the Actions tab
+
+jobs:
+  sync-xpoz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: connectors
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install xpoz
+
+      - name: Sync earned mentions
+        env:
+          DA_SUPABASE_URL: ${{ secrets.DA_SUPABASE_URL }}
+          DA_SUPABASE_SERVICE_KEY: ${{ secrets.DA_SUPABASE_SERVICE_KEY }}
+          XPOZ_API_KEY: ${{ secrets.XPOZ_API_KEY }}
+        run: |
+          python -c "import xpoz_connector; print(f'Xpoz sync: {xpoz_connector.run()} rows')"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::Xpoz weekly sync failed -- check the logs above."

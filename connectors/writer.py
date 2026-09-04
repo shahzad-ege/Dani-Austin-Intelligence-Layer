@@ -34,6 +34,7 @@ CONFLICT_KEYS = {
     "podcast_ad_bookings": "show_id,episode_air_date,slot_type,pulled_at",
     "podcast_top_episode_snapshots": "show_id,pulled_at",
     "da_entity_summary": "month,metric",
+    "earned_mentions": "platform,post_id",
 }
 
 
