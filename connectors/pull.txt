@@ -1,0 +1,93 @@
+All schedule data captured — every slot in the 30-day window had a brand booked (no "Available" slots appeared). Now checking Audience tab.Now clicking Audience tab.Let me scroll down to see the full age and gender breakdown tables.Showing 1 to 5 of 16 countries — need to page through all. Clicking Next.Page 2: South Africa 0.2%, Spain 0.1%, Sweden 0.1%, New Zealand 0.1%, India 0.1%. Continuing to next page.Page 3: Switzerland 0.1%, France 0.1%, Ireland 0.1%, Mexico 0.1%, Brazil 0.1%. One more page (16th country).PODSTOCK DAILY PULL — 2026-09-08
+
+OVERVIEW
+Total delivery: 690,167 (-14%)
+  Spotify Streams: 314,227 (-30%)
+  Megaphone Downloads: 296,848 (+2%)
+  YouTube Views: 77,425 (+24%)
+  Art19 Downloads: 1,667 (-17%)
+Total hours: 274,436 (+4%)
+  Spotify: 134,298 (-7%)
+  Apple: 114,330 (+19%)
+  YouTube: 25,808 (+12%)
+Time per delivery: 24m, 32s (+25%)
+New vs. back catalog — delivery: 623,006 (new, -15%) / 67,161 (back, -8%), hours: 261,200 (new, +6%) / 13,235 (back, -16%)
+Engagements total: 1,320 (+8%)
+  Likes: 1,061 (+10%)
+  Comments: 157 (+4%)
+  Shares: 102 (-3%)
+Engagement rate: 1.76% (-12%)
+Positive reaction rate: 96.4% (+1%)
+Sharing rate: 0.13% (-24%)
+Comment rate: 0.20% (-17%)
+
+(Date filter on Overview: Last 90 days, Daily aggregation, Longform format, all platforms — this was the default view; not changed.)
+
+EPISODES
+Total episodes: 176 (all-time)
+Avg delivery/episode: 53,855
+Platform split: Spotify 47.5%/25,595, Downloads 40.6%/21,858, YouTube 11.9%/6,402
+Top recent episode: "Why Moving to Nashville Changed Everything" — 71,291 total delivery
+(Per instructions, the full paginated episode list was not pulled — only these aggregate stats and the single top episode from the 10 most-recent episodes shown.)
+
+CHANNELS
+Total followers: 150,728 (-5%)
+  Spotify: 104,383 (0%)
+  Apple: 46,345 (0%)
+  YouTube: not displayed — the Channels tab's follower summary only shows Spotify and Apple figures; no YouTube subscriber count appears in that section.
+Active connections: 5 (Apple, Spotify, Art19, YouTube, Megaphone — all listed "Active")
+
+SCHEDULE (2026-09-08 to 2026-10-08 — ALL bookings across ALL pages; every visible slot was booked, no "Available" slots appeared)
+
+Episode: September 10, 2026
+Quince — Host Read (Mid-Roll #1) — Booked
+Monarch Money — Host Read (Mid-Roll #2) — Booked
+Wayfair — Host Read (Mid-Roll #3) — Booked
+Hiya Health — Host Read (Mid-Roll #4) — Booked
+Ogee — Host Read (Mid-Roll #5) — Booked
+Our Place — Host Read (Mid-Roll #6) — Booked
+instant hydration — Host Read (Mid-Roll #7) — Booked
+
+Episode: September 17, 2026
+Cotton: The Fabric of Our Lives — Host Read (Mid-Roll #1) — Booked
+Salt & Stone — Host Read (Mid-Roll #2) — Booked
+Little Spoon — Host Read (Mid-Roll #3) — Booked
+Vionic — Host Read (Mid-Roll #4) — Booked
+CORT Furniture — Host Read (Mid-Roll #5) — Booked
+KiwiCo — Host Read (Mid-Roll #6) — Booked
+Momcozy — Host Read (Mid-Roll #7) — Booked
+
+Episode: September 24, 2026
+Hiya Health — Host Read (Mid-Roll #1) — Booked
+Vionic — Host Read (Mid-Roll #2) — Booked
+Cozy Earth — Host Read (Mid-Roll #3) — Booked
+Ladder — Host Read (Mid-Roll #4) — Booked
+Vote Online — Host Read (Mid-Roll #5) — Booked
+Yoto — Host Read (Mid-Roll #6) — Booked
+Freestyle — Host Read (Mid-Roll #7) — Booked
+
+Episode: October 01, 2026
+Ka'Chava — Host Read (Mid-Roll #1) — Booked
+Cash App — Host Read (Mid-Roll #2) — Booked
+Cotton: The Fabric of Our Lives — Host Read (Mid-Roll #3) — Booked
+Little Spoon — Host Read (Mid-Roll #4) — Booked
+Vionic — Host Read (Mid-Roll #5) — Booked
+Vote Online — Host Read (Mid-Roll #6) — Booked
+Seed — Host Read (Mid-Roll #7) — Booked
+Cotton: The Fabric of Our Lives — Social (IG Story) — Booked
+
+Episode: October 08, 2026
+Quince — Host Read (Mid-Roll #1) — Booked
+Monarch Money — Host Read (Mid-Roll #2) — Booked
+Wayfair — Host Read (Mid-Roll #3) — Booked
+Hiya Health — Host Read (Mid-Roll #4) — Booked
+Cozy Earth — Host Read (Mid-Roll #5) — Booked
+Ladder — Host Read (Mid-Roll #6) — Booked
+Vote Online — Host Read (Mid-Roll #7) — Booked
+
+AUDIENCE (Last 3 Months — this was the default selected range on the Audience tab; not changed)
+Age (% of Total Delivery): 25-34: 51.4%, 35-44: 27.6%, 45-54: 7.6%, 18-24: 5.9%, 55-64: 4.3%, 65+: 2.9%, 13-17: 0.4%
+Gender (% of Total Delivery): Female 91.3%, Male 7.2%, Unknown 1.4%, Non-binary 0.0%
+Country (% of Total Delivery, all 16 rows across all pages): United States 93.0%, Canada 3.7%, United Kingdom 0.5%, Australia 0.4%, South Africa 0.2%, Spain 0.1%, Sweden 0.1%, New Zealand 0.1%, India 0.1%, Switzerland 0.1%, France 0.1%, Ireland 0.1%, Mexico 0.1%, Brazil 0.1%, Netherlands 0.1%
+
+Note on the country list: pagination reported "Showing 1 to 5 of 16" on page 1 (ending in South Africa) and then "Showing 6 to 10 of 16" on page 2 (starting again with South Africa), meaning South Africa's row appears to be listed at both position 5 and position 6 in the dashboard's own pagination — this looks like a duplicate-entry artifact in Podstock's data (similar in kind to the known episode-list duplicate issue), not something I merged or corrected. I'm flagging it rather than guessing which entry is right; only 15 distinct countries are represented above even though the tool reports "16."

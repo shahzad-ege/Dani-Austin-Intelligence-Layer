@@ -131,6 +131,28 @@ def refresh_access_token() -> str:
 
 
 def seed_account() -> int:
+    """
+    REAL BUG, found in a full-system regression (Sep 2026) and fixed at
+    the root this time: TIKTOK_BUSINESS_ID is read from the environment,
+    and while TikTok's Accounts API approval is still pending it's
+    typically set to an EMPTY STRING just to satisfy the required env
+    var. seed_account() then happily wrote a social_accounts row with
+    account_id = '' -- an orphaned row that joins to nothing and risks
+    splitting or double-counting TikTok rollups.
+
+    This row had been manually deleted at least twice in earlier
+    sessions, but kept coming back, because the deletions treated the
+    symptom while this function kept recreating it on every run. Now it
+    refuses to seed a blank ID at all.
+    """
+    if not TIKTOK_BUSINESS_ID or not TIKTOK_BUSINESS_ID.strip():
+        print(
+            "[tiktok] TIKTOK_BUSINESS_ID is empty -- skipping social_accounts "
+            "seed rather than writing an orphaned blank-ID row. This is "
+            "expected while TikTok Accounts API approval is still pending."
+        )
+        return 0
+
     account = SocialAccount(
         platform="tiktok", handle="daniaustin", account_id=TIKTOK_BUSINESS_ID, is_core=True
     )

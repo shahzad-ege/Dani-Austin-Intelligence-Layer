@@ -153,3 +153,66 @@ if __name__ == "__main__":
     test_duplicate_country_entry_flagged_not_silently_overwritten()
     test_booking_slot_name_with_internal_hyphen_not_split_incorrectly()
     print("All Podstock parser tests passed.")
+
+
+# ---------- Real bugs found and fixed against a live pull (Sep 2026) ----------
+
+def test_episode_prefixed_full_month_date_header_parses():
+    """REAL bug: a live pull used 'Episode: September 10, 2026' -- the
+    old regex required a bare 3-letter month abbreviation with no
+    prefix, so this never matched. current_air_date stayed None,
+    silently blocking every real booking line even though the
+    booking-line regex itself parsed correctly."""
+    text = """SCHEDULE (2026-09-08 to 2026-10-08)
+
+Episode: September 10, 2026
+Quince — Host Read (Mid-Roll #1) — Booked
+
+AUDIENCE
+"""
+    metrics, demographics, bookings, top_episode, skipped = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    assert len(bookings) == 1
+    assert bookings[0]["episode_air_date"] == "2026-09-10"
+    assert bookings[0]["brand"] == "Quince"
+
+
+def test_time_per_delivery_with_comma_separator_parses():
+    """REAL bug: two of three real pulls used 'Xm, Ys' (comma+space)
+    rather than 'XmYs' -- the old regex had no room for a comma."""
+    text = "OVERVIEW\nTime per delivery: 24m, 32s (+25%)\n"
+    metrics, *_ = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    matches = [m for m in metrics if m["metric"] == "time_per_delivery_seconds"]
+    assert len(matches) == 1
+    assert matches[0]["value"] == 24 * 60 + 32
+
+
+def test_new_back_catalog_split_handles_all_three_real_formats():
+    """REAL bug: three real pulls used three different formats for this
+    field ('643,947/67,996', '643,947 (new) / 67,996 (back)', '623,006
+    (new, -15%) / 67,161 (back, -8%)') -- the old regex required literal
+    'New Releases'/'Back Catalog' text that never actually appeared in
+    any real pull."""
+    bare = "New vs. back catalog — delivery: 643,947/67,996, hours: 226,953/12,543\n"
+    labeled_no_pct = "New vs. back catalog — delivery: 643,947 (new) / 67,996 (back), hours: 226,953 (new) / 12,543 (back)\n"
+    labeled_with_pct = "New vs. back catalog — delivery: 623,006 (new, -15%) / 67,161 (back, -8%), hours: 261,200 (new, +6%) / 13,235 (back, -16%)\n"
+
+    for text, expect_pct in [(bare, False), (labeled_no_pct, False), (labeled_with_pct, True)]:
+        metrics, *_ = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+        new_delivery = [m for m in metrics if m["metric"] == "new_releases_delivery"]
+        assert len(new_delivery) == 1, f"failed to parse: {text!r}"
+        if expect_pct:
+            assert new_delivery[0]["pct_change"] == -15.0
+        else:
+            assert new_delivery[0]["pct_change"] is None
+
+
+def test_catalog_split_number_parsing_does_not_swallow_trailing_comma():
+    """REAL bug caught while fixing the above: a loose [\\d,]+ number
+    pattern greedily captured the separator comma before ', hours:',
+    producing an unparseable '67,996,' value. Fixed with a precise
+    thousand-separator pattern."""
+    text = "New vs. back catalog — delivery: 643,947/67,996, hours: 226,953/12,543\n"
+    metrics, *_ = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    back_delivery = [m for m in metrics if m["metric"] == "back_catalog_delivery"]
+    assert len(back_delivery) == 1
+    assert back_delivery[0]["value"] == 67996.0  # not corrupted by a trailing comma

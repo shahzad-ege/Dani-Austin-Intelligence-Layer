@@ -590,3 +590,65 @@ def test_facebook_demographics_uses_page_token_not_system_token():
     assert mock_token.called
     for call in mock_get.call_args_list:
         assert call.kwargs.get("token") == "THE_REAL_PAGE_TOKEN"
+
+
+# ---------- TikTok orphaned-row root cause (found in full regression) ----------
+
+def test_tiktok_seed_refuses_blank_business_id():
+    """REAL recurring bug, fixed at the root in Sep 2026: an empty
+    TIKTOK_BUSINESS_ID (common while Accounts API approval is pending,
+    since the env var is still required) caused seed_account() to write
+    a social_accounts row with account_id = '' -- an orphaned row that
+    joins to nothing. It had been manually deleted twice before and kept
+    returning, because the deletions treated the symptom while this
+    function recreated it every run."""
+    with patch("tiktok_connector.TIKTOK_BUSINESS_ID", ""), \
+         patch("tiktok_connector.upsert_rows") as mock_upsert:
+        result = tiktok_connector.seed_account()
+
+    assert result == 0
+    assert not mock_upsert.called
+
+
+def test_tiktok_seed_refuses_whitespace_only_business_id():
+    with patch("tiktok_connector.TIKTOK_BUSINESS_ID", "   "), \
+         patch("tiktok_connector.upsert_rows") as mock_upsert:
+        result = tiktok_connector.seed_account()
+
+    assert result == 0
+    assert not mock_upsert.called
+
+
+def test_tiktok_seed_still_works_with_a_real_business_id():
+    with patch("tiktok_connector.TIKTOK_BUSINESS_ID", "real_id_123"), \
+         patch("tiktok_connector.upsert_rows", return_value=1) as mock_upsert:
+        result = tiktok_connector.seed_account()
+
+    assert result == 1
+    assert mock_upsert.called
+    written = mock_upsert.call_args.args[1][0]
+    assert written["account_id"] == "real_id_123"
+
+
+def test_facebook_demographics_date_matches_meta_documented_example():
+    """REAL bug found in a full-system regression: an earlier fix
+    correctly parsed end_time's date portion but was still off by one
+    day. Confirmed via Meta's own documentation (matching our exact
+    stored format): Page Insights values are PST/PDT, end_time is UTC.
+    Meta's own example -- "2020-11-21T08:00:00+0000" -- describes data
+    for 2020-11-20 in Facebook's Business Manager. Production had 90
+    rows dated one day in the future before this fix."""
+    def fake_get(path, params, token=None):
+        if params.get("metric") == "page_follows_city":
+            return {"data": [{"values": [
+                {"value": {"Dallas, TX": 500}, "end_time": "2020-11-21T08:00:00+0000"},
+            ]}]}
+        return {"data": []}
+
+    with patch("meta_connector.get_page_access_token", return_value="fake_token"), \
+         patch("meta_connector._get", side_effect=fake_get):
+        records = meta_connector.fetch_facebook_demographics(days_back=30)
+
+    city_records = [r for r in records if r.dimension == "city"]
+    assert len(city_records) == 1
+    assert str(city_records[0].period_date) == "2020-11-20"

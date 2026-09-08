@@ -93,6 +93,29 @@ def parse_pull(text: str, period_date=None):
     skipped_notes lists anything found in the text but not converted to a
     row, so nothing silently vanishes.
     """
+    # REAL BUG, found when a manually-saved Notepad file parsed metrics/
+    # demographics correctly but silently dropped ALL bookings and the
+    # top-episode line -- while the same text pasted directly worked
+    # fine. Two well-known Windows/Notepad text-corruption patterns,
+    # both fixed proactively here since I couldn't get the actual saved
+    # file content to confirm which one hit, and both are cheap to guard
+    # against regardless:
+    #   1. CRLF line endings ("\r\n") -- Windows' default when saving
+    #      plain text. A stray \r before each \n can break regexes that
+    #      rely on end-of-line anchors ($) or exact adjacency, even
+    #      though simpler \s*-based patterns (like most of the metrics
+    #      parsing) tolerate it fine -- which matches exactly what was
+    #      observed: metrics/demographics worked, bookings/top-episode
+    #      (both anchor- and quote-dependent) didn't.
+    #   2. "Smart quotes" -- Notepad and many Windows text flows
+    #      autocorrect straight quotes (") into curly ones (" and ").
+    #      The top-episode regex requires a literal straight quote
+    #      around the episode title; a curly quote wouldn't match at
+    #      all.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+
     period_date = period_date or date.today()
     metric_rows = []
     demographic_rows = []
@@ -143,14 +166,19 @@ def parse_pull(text: str, period_date=None):
                 skipped.append(f"hours not found for {platform}")
 
     # --- Overview: time per delivery, duration format converted to seconds ---
-    m = re.search(r"Time per delivery:\s*(\d+)m\s*(\d+)s\s*\(([+-]?\d+)%\)", text)
+    # REAL BUG, confirmed against 3 real pulls showing 3 different
+    # formats: "20m17s" (no separator), "20m, 17s" and "24m, 32s" (comma+
+    # space). The old pattern required exactly "\s*" between m and the
+    # seconds digits, which doesn't match a literal comma. Made the comma
+    # optional so all three confirmed real variations parse correctly.
+    m = re.search(r"Time per delivery:\s*(\d+)m,?\s*(\d+)s\s*\(([+-]?\d+)%\)", text)
     if m:
         seconds = _duration_to_seconds(m.group(1), m.group(2))
         add("combined", "time_per_delivery_seconds", seconds, _num(m.group(3)))
     else:
         skipped.append("time per delivery (combined) not found or not in Xm Ys format")
 
-    for platform_match in re.finditer(r"(\w+)\s+(\d+)m\s*(\d+)s\s*\(([+-]?\d+)%\)", text):
+    for platform_match in re.finditer(r"(\w+)\s+(\d+)m,?\s*(\d+)s\s*\(([+-]?\d+)%\)", text):
         platform_name = platform_match.group(1)
         if platform_name not in ("YouTube", "Spotify", "Apple"):
             continue
@@ -158,19 +186,37 @@ def parse_pull(text: str, period_date=None):
         add(platform_name, "time_per_delivery_seconds", seconds, _num(platform_match.group(4)))
 
     # --- Overview: new releases vs. back catalog, delivery and hours ---
+    # REAL BUG, confirmed against 3 real pulls showing 3 different
+    # formats for this same field:
+    #   v1: "643,947/67,996" (bare numbers, no labels, no pct)
+    #   v2: "643,947 (new) / 67,996 (back)" (labeled, no pct)
+    #   today: "623,006 (new, -15%) / 67,161 (back, -8%)" (labeled + pct)
+    # The old pattern required literal "New Releases"/"Back Catalog"
+    # text, which never actually appeared in any real pull -- this field
+    # had likely never successfully parsed since it was written. Rebuilt
+    # to handle all 3 confirmed real variations, with pct_change
+    # correctly staying null for the two formats that don't include one
+    # (a genuine feature -- not every field has historical comparison
+    # available every pull, and null is correct, not a parsing failure).
+    # Number pattern uses \d{1,3}(?:,\d{3})* rather than a loose [\d,]+
+    # so it can't accidentally swallow a trailing separator comma from
+    # the following ", hours:" text.
+    _num_pat = r"\d{1,3}(?:,\d{3})*"
     delivery_half = re.search(
-        r"delivery:\s*New Releases\s*([\d,]+)\s*\(([+-]?\d+)%\)\s*/\s*Back Catalog\s*([\d,]+)\s*\(([+-]?\d+)%\)", text)
+        rf"delivery:\s*({_num_pat})\s*(?:\(new(?:,\s*([+-]?\d+)%)?\))?\s*/\s*({_num_pat})\s*(?:\(back(?:,\s*([+-]?\d+)%)?\))?",
+        text)
     if delivery_half:
-        add("combined", "new_releases_delivery", _num(delivery_half.group(1)), _num(delivery_half.group(2)))
-        add("combined", "back_catalog_delivery", _num(delivery_half.group(3)), _num(delivery_half.group(4)))
+        add("combined", "new_releases_delivery", _num(delivery_half.group(1)), _num(delivery_half.group(2)) if delivery_half.group(2) else None)
+        add("combined", "back_catalog_delivery", _num(delivery_half.group(3)), _num(delivery_half.group(4)) if delivery_half.group(4) else None)
     else:
         skipped.append("new releases/back catalog delivery split not found")
 
     hours_half = re.search(
-        r"hours:\s*New Releases\s*([\d,]+)\s*\(([+-]?\d+)%\)\s*/\s*Back Catalog\s*([\d,]+)\s*\(([+-]?\d+)%\)", text)
+        rf"hours:\s*({_num_pat})\s*(?:\(new(?:,\s*([+-]?\d+)%)?\))?\s*/\s*({_num_pat})\s*(?:\(back(?:,\s*([+-]?\d+)%)?\))?",
+        text)
     if hours_half:
-        add("combined", "new_releases_hours", _num(hours_half.group(1)), _num(hours_half.group(2)))
-        add("combined", "back_catalog_hours", _num(hours_half.group(3)), _num(hours_half.group(4)))
+        add("combined", "new_releases_hours", _num(hours_half.group(1)), _num(hours_half.group(2)) if hours_half.group(2) else None)
+        add("combined", "back_catalog_hours", _num(hours_half.group(3)), _num(hours_half.group(4)) if hours_half.group(4) else None)
     else:
         skipped.append("new releases/back catalog hours split not found")
 
@@ -262,7 +308,20 @@ def parse_pull(text: str, period_date=None):
             line = line.strip()
             if not line:
                 continue
-            date_header = re.match(r'^([A-Z][a-z]{2}\s+\d{1,2},\s*\d{4})(?:\s*[–—]\s*"([^"]+)")?$', line)
+            # REAL BUG, confirmed against a live pull (Sep 2026): this
+            # regex required a 3-letter abbreviated month ("Sep 10,
+            # 2026") with no prefix, but the real pull used the full
+            # month name with an "Episode: " prefix ("Episode: September
+            # 10, 2026"). Tested directly: the OLD pattern failed to
+            # match at all, meaning current_air_date never got set, which
+            # silently blocked every real booking line from being saved
+            # even though the booking-line regex itself parsed correctly.
+            # Confirmed real formats now handled: with/without "Episode:"
+            # prefix, abbreviated or full month name.
+            date_header = re.match(
+                r'^(?:Episode:\s*)?([A-Z][a-z]{2,8}\s+\d{1,2},\s*\d{4})(?:\s*[–—]\s*"([^"]+)")?$',
+                line,
+            )
             if date_header:
                 current_air_date = _try_parse_date(date_header.group(1))
                 current_title = date_header.group(2)
@@ -330,7 +389,19 @@ def parse_pull(text: str, period_date=None):
 
 
 def run(filepath: str) -> int:
-    with open(filepath) as f:
+    # REAL BUG, confirmed via direct codepoint-level diagnosis on
+    # Shahzad's actual Windows machine (Sep 2026): open(filepath) with
+    # no explicit encoding uses the OS's default locale encoding.
+    # Linux/this sandbox defaults to UTF-8, so this was never caught in
+    # testing here -- but Windows commonly defaults to cp1252, which
+    # misreads the UTF-8 byte sequence for an em-dash (E2 80 94) as
+    # unrelated garbage characters entirely. That silently broke every
+    # dash-dependent match (bookings, top-episode) while pure-ASCII
+    # fields (metrics, demographics) parsed fine -- exactly the pattern
+    # observed. Confirmed via a diagnostic script that read the same
+    # file with an explicit encoding="utf-8" and got the correct
+    # character; this function just never specified one.
+    with open(filepath, encoding="utf-8") as f:
         text = f.read()
 
     metric_rows, demographic_rows, booking_rows, top_episode_rows, skipped = parse_pull(text)

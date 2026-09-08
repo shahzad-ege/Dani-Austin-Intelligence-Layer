@@ -562,20 +562,29 @@ def fetch_facebook_demographics(days_back: int = 30) -> list[SocialDemographic]:
                 if not end_time or not isinstance(value_dict, dict):
                     continue
                 try:
-                    # REAL BUG, confirmed against a live run on Shahzad's
-                    # machine (Python 3.10): Facebook returns end_time as
-                    # e.g. "2026-08-05T07:00:00+0000" -- no colon in the
-                    # offset. datetime.fromisoformat() accepts this on
-                    # Python 3.11+ but REJECTS it on 3.10 with a
-                    # ValueError. My own tests passed because this
-                    # sandbox runs 3.12 -- a real gap between test and
-                    # deployment environments that hid this completely.
-                    # Fix: don't parse a timezone-aware datetime at all --
-                    # only the DATE is ever needed here, and the first 10
-                    # characters of any ISO-8601-like string are always
-                    # YYYY-MM-DD regardless of what the offset looks like
-                    # or which Python version is running.
-                    entry_date = date.fromisoformat(end_time[:10])
+                    # REAL BUG #1 (fixed earlier): Python 3.10 rejects
+                    # "+0000" (no colon) in fromisoformat() on Python <3.11.
+                    # Fixed by slicing just the date portion rather than
+                    # parsing a full datetime.
+                    #
+                    # REAL BUG #2, found in a full-system regression (Sep
+                    # 2026): that fix was still wrong by one day. Confirmed
+                    # directly from Meta's own documented example (matching
+                    # our exact stored format) and a third-party source
+                    # explicitly documenting this exact confusion: Facebook
+                    # Page Insights values are in PST/PDT, but end_time is
+                    # rendered in UTC. "2020-11-21T08:00:00+0000" describes
+                    # data for 2020-11-20 in Facebook's own Business
+                    # Manager. Naively slicing the UTC date (as the earlier
+                    # fix did) is one day ahead of the real Pacific-time
+                    # day the data describes -- confirmed in production:
+                    # 90 rows had landed dated one day in the future.
+                    # Subtracting one day corrects this. (Not a full
+                    # timezone conversion -- Meta's own fixed "T07:00" /
+                    # "T08:00" offset already reflects PDT/PST's whole-day
+                    # shift, so a simple -1 day is the correct, confirmed
+                    # fix here, not an approximation.)
+                    entry_date = date.fromisoformat(end_time[:10]) - timedelta(days=1)
                 except ValueError:
                     print(f"[meta]   FB demographics '{dimension}': unparseable end_time {end_time!r} -- skipping this entry")
                     continue

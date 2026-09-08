@@ -239,3 +239,40 @@ if __name__ == "__main__":
     test_run_parses_confirmed_real_field_names()
     test_unparseable_date_does_not_crash_the_whole_sync()
     print("All Airtable connector tests passed.")
+
+
+def test_blank_table_name_env_var_falls_back_to_partnerships():
+    """REAL bug, confirmed against a live GitHub Actions run (Sep 2026):
+    a plain os.environ.get(..., "Partnerships") only applies the
+    default when the key is ABSENT, not when it's present but blank.
+    The real GitHub Secret existed but was empty, producing a URL with
+    no table name segment at all and a 404. Same class of bug already
+    found in tiktok_connector.py earlier the same day."""
+    import importlib
+    with patch.dict(os.environ, {"AIRTABLE_TABLE_NAME": ""}):
+        importlib.reload(airtable_connector)
+    try:
+        assert airtable_connector.AIRTABLE_TABLE_NAME == "Partnerships"
+        assert "/Partnerships" in airtable_connector.AIRTABLE_BASE_URL
+    finally:
+        importlib.reload(airtable_connector)  # restore normal state for other tests
+
+
+def test_whitespace_only_table_name_also_falls_back():
+    import importlib
+    with patch.dict(os.environ, {"AIRTABLE_TABLE_NAME": "   "}):
+        importlib.reload(airtable_connector)
+    try:
+        assert airtable_connector.AIRTABLE_TABLE_NAME == "Partnerships"
+    finally:
+        importlib.reload(airtable_connector)
+
+
+def test_real_custom_table_name_still_respected():
+    import importlib
+    with patch.dict(os.environ, {"AIRTABLE_TABLE_NAME": "SomeOtherTable"}):
+        importlib.reload(airtable_connector)
+    try:
+        assert airtable_connector.AIRTABLE_TABLE_NAME == "SomeOtherTable"
+    finally:
+        importlib.reload(airtable_connector)

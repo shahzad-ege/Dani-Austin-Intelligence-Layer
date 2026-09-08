@@ -1,0 +1,32 @@
+-- ============================================================
+-- Migration 023: Podstock parser bugs found processing a real live pull (Sep 8, 2026)
+-- ============================================================
+-- No schema changes -- all fixes are in podstock_parse_pull.py.
+-- Documented here for the record:
+--
+-- 1. date_header regex required a 3-letter month abbreviation with no
+--    prefix ("Sep 10, 2026"). Real pull used "Episode: September 10,
+--    2026" (full month name + prefix). This silently blocked ALL 36
+--    real ad-booking rows from being captured -- current_air_date
+--    never got set, so the booking-line regex (which itself parsed
+--    correctly) never had a date to attach to.
+--
+-- 2. time_per_delivery regex required "XmYs" with no separator. Real
+--    pulls have shown "Xm, Ys" (comma+space) in 2 of 3 real pulls seen.
+--    Made the comma optional.
+--
+-- 3. new/back catalog split regex required literal "New Releases"/
+--    "Back Catalog" text, which has NEVER appeared in any of the 3 real
+--    pulls seen (formats seen: bare numbers, "(new)"/"(back)" labels
+--    with no pct, "(new, -15%)"/"(back, -8%)" labels with pct). This
+--    field had likely never successfully parsed since it was written.
+--    Rebuilt to handle all 3 confirmed real variations.
+--
+-- 4. Caught while fixing #3: the number-matching pattern used a loose
+--    [\d,]+ that could swallow a trailing separator comma from
+--    ", hours:" immediately following. Fixed with a precise
+--    \d{1,3}(?:,\d{3})* thousand-separator pattern.
+--
+-- Real data from this pull successfully written: 34 metrics, 22
+-- demographics, 36 ad bookings (previously would have been 0), 1 top
+-- episode snapshot.

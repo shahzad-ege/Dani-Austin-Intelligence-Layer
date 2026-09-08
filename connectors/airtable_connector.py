@@ -38,7 +38,18 @@ from writer import upsert_rows
 
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
-AIRTABLE_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Partnerships")
+
+# REAL BUG, confirmed against a real GitHub Actions run (Sep 2026): a
+# plain os.environ.get(..., "Partnerships") only applies the default
+# when the key is ABSENT -- not when it's present but blank. The real
+# GitHub Secret existed but held an empty string, so this returned ""
+# instead of "Partnerships", building a URL with no table name segment
+# at all (".../v0/{baseId}/?pageSize=100") and failing with a 404. Same
+# class of bug already found and fixed in tiktok_connector.py earlier
+# the same day -- an env var being merely *set* doesn't mean it's
+# usable. Now explicitly treats blank the same as absent.
+_raw_table_name = os.environ.get("AIRTABLE_TABLE_NAME", "").strip()
+AIRTABLE_TABLE_NAME = _raw_table_name if _raw_table_name else "Partnerships"
 
 AIRTABLE_BASE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
 
