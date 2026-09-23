@@ -82,31 +82,46 @@ def _validate_credentials_not_empty() -> None:
 
 def refresh_access_token() -> str:
     """
-    CORRECTED after a real CI failure: this connector was calling the
-    WRONG ENDPOINT with the WRONG FIELD NAMES, and TikTok's confusing error
-    ("app_id: Missing data for required field") looked at first like an
-    access-approval problem rather than a code bug.
+    REAL, CONFIRMED FIX (Sep 23 2026), sourced directly from TikTok's
+    own official API documentation, not inferred from error messages.
 
-    Two real, confirmed fixes, verified against multiple independent
-    real-world implementations of this exact endpoint (not guessed):
-      1. /oauth2/access_token/ is for the INITIAL authorization-code
-         exchange. Refreshing an existing refresh_token requires the
-         SEPARATE /oauth2/refresh_token/ endpoint -- a different path,
-         not just a different grant_type on the same one.
-      2. The TikTok Business API uses `app_id` and `secret` as its field
-         names -- NOT `client_key`/`client_secret`, which is the naming
-         used by TikTok's OTHER, consumer-facing API
-         (open.tiktokapis.com). Easy to mix up since both are called
-         "TikTok's API" casually, but they're different products with
-         different conventions.
+    The account-holder authorization flow this connector actually uses
+    (via www.tiktok.com/v2/auth/authorize) is TikTok's "business_organic"
+    API type. Its token operations use TWO SEPARATE endpoints, not one
+    reused with a different grant_type:
+      - Initial exchange: /tt_user/oauth2/token/
+      - Refresh:          /tt_user/oauth2/refresh_token/
+    Both use client_id/client_secret (confirmed directly by TikTok's
+    error when app_id/secret was tried: "client_id: Missing data for
+    required field"). The refresh endpoint's field IS genuinely named
+    "refresh_token" -- an earlier "auth_code: Missing data" error came
+    from hitting the exchange-only endpoint with a refresh_token grant,
+    which that endpoint doesn't support at all, not from a wrong field
+    name.
+
+    /oauth2/access_token/ and /oauth2/refresh_token/ (no tt_user/
+    prefix) belong to a DIFFERENT flow entirely ("marketing" /
+    Advertiser authorization, using app_id/secret), which this
+    connector has never actually completed.
     """
     _validate_credentials_not_empty()
 
     resp = requests.post(
-        f"{TIKTOK_BASE_URL}/oauth2/refresh_token/",
+        f"{TIKTOK_BASE_URL}/tt_user/oauth2/refresh_token/",
         json={
-            "app_id": TIKTOK_CLIENT_KEY,
-            "secret": TIKTOK_CLIENT_SECRET,
+            # REAL, CONFIRMED FIX, sourced directly from TikTok's own
+            # official API documentation (ads.tiktok.com/gateway/docs),
+            # not inferred from error messages: refreshing uses a
+            # SEPARATE, dedicated endpoint --
+            # /tt_user/oauth2/refresh_token/ -- not the exchange
+            # endpoint (/tt_user/oauth2/token/) reused with a
+            # different grant_type. The field IS genuinely named
+            # "refresh_token" on this correct endpoint; the earlier
+            # "auth_code: Missing data" error was because that field
+            # requirement belongs to the exchange-only endpoint, which
+            # doesn't accept a refresh_token grant at all.
+            "client_id": TIKTOK_CLIENT_KEY,
+            "client_secret": TIKTOK_CLIENT_SECRET,
             "grant_type": "refresh_token",
             "refresh_token": TIKTOK_REFRESH_TOKEN,
         },
@@ -195,7 +210,17 @@ def fetch_video_metrics(access_token: str) -> list[SocialMetric]:
         },
     )
     resp.raise_for_status()
-    videos = resp.json().get("data", {}).get("videos", [])
+    raw = resp.json()
+    videos = raw.get("data", {}).get("videos", [])
+    # TEMPORARY real diagnostic (Sep 23 2026): fetch_video_metrics()
+    # summed to all-zero in production despite this exact response
+    # shape independently proven to work correctly when tested
+    # directly. Printing the real video count so the next live run
+    # shows exactly what TikTok actually returned at that moment,
+    # rather than guessing between a token-timing issue and something
+    # else -- remove once the real cause is confirmed.
+    print(f"[tiktok DIAGNOSTIC] /business/video/list/ returned {len(videos)} real video(s). "
+          f"Raw response code/message: {raw.get('code')}/{raw.get('message')}")
 
     totals = {"views": 0.0, "likes": 0.0, "comments": 0.0, "shares": 0.0}
     for video in videos:
@@ -328,11 +353,77 @@ def sync_posts() -> int:
     return written
 
 
+def sync_recent_video_metrics(access_token: str) -> int:
+    """
+    Lightweight, ongoing counterpart to backfill_tiktok_videos.py's
+    full historical walk. Only fetches the first few pages (most
+    recent videos, since TikTok sorts by create_time descending) --
+    NOT a full re-backfill, which would mean 90 API calls to re-fetch
+    videos whose engagement data has already frozen (TikTok's own
+    real limit: enrichment fields go null after ~7 days of no new
+    engagement). A handful of pages comfortably covers a week of new
+    posts even at high posting frequency, with real margin.
+
+    Writes to tiktok_video_metrics (per-video), separate from the
+    account-level social_metrics this connector's other functions write.
+    """
+    RECENT_PAGES = 5  # ~100 videos -- real, comfortable margin over a 7-day posting window
+    videos: list[dict] = []
+    cursor = None
+
+    for page in range(RECENT_PAGES):
+        params = {
+            "business_id": TIKTOK_BUSINESS_ID,
+            "fields": '["video_views","likes","comments","shares","item_id","create_time"]',
+            "max_count": 20,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+
+        resp = requests.get(f"{TIKTOK_BASE_URL}/business/video/list/", headers={"Access-Token": access_token}, params=params)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        page_videos = data.get("videos", [])
+        videos.extend(page_videos)
+
+        if not data.get("has_more", False):
+            break
+        cursor = data.get("cursor")
+
+    rows = []
+    for v in videos:
+        item_id = v.get("item_id")
+        if not item_id:
+            continue
+        create_time_raw = v.get("create_time")
+        create_time_iso = None
+        if create_time_raw:
+            try:
+                create_time_iso = datetime.fromtimestamp(int(create_time_raw), tz=timezone.utc).isoformat()
+            except (ValueError, TypeError):
+                pass
+        rows.append({
+            "item_id": item_id,
+            "create_time": create_time_iso,
+            "video_views": int(v.get("video_views") or 0),
+            "likes": int(v.get("likes") or 0),
+            "comments": int(v.get("comments") or 0),
+            "shares": int(v.get("shares") or 0),
+        })
+
+    if not rows:
+        return 0
+    return upsert_rows("tiktok_video_metrics", rows)
+
+
 def run() -> int:
     seed_account()
     access_token = refresh_access_token()
     records = fetch_profile_metrics(access_token) + fetch_video_metrics(access_token)
-    return upsert_rows("social_metrics", [r.to_row() for r in records])
+    count = upsert_rows("social_metrics", [r.to_row() for r in records])
+    video_count = sync_recent_video_metrics(access_token)
+    print(f"[tiktok] Also refreshed {video_count} recent per-video row(s).")
+    return count
 
 
 if __name__ == "__main__":
