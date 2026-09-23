@@ -12,6 +12,9 @@ from db import get_client
 # Maps each table to its natural-key / unique-constraint columns,
 # matching the `unique (...)` constraints defined in the schema.
 CONFLICT_KEYS = {
+    "youtube_video_stats": "video_id",
+    "youtube_video_analytics": "video_id,period_date",
+    "youtube_traffic_sources": "video_id,period_date,traffic_source_type",
     "tiktok_video_metrics": "item_id",
     "qb_da_transaction_lines": "qb_txn_id,qb_line_id",
     "qb_oauth_credentials": "realm_id",

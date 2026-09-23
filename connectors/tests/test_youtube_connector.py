@@ -78,21 +78,34 @@ def test_channel_not_found_raises_clear_error():
 def test_fetch_video_analytics_uses_oauth_not_api_key():
     """Confirmed via research: Analytics API (retention, watch time)
     requires OAuth, unlike the Data API's simple key auth -- this is
-    private, owner-only data."""
+    private, owner-only data.
+
+    Expanded (Sep 23 2026) from 3 metrics to the real, confirmed core
+    set: views,estimatedMinutesWatched,likes,comments,shares,
+    averageViewDuration,averageViewPercentage,subscribersGained,
+    subscribersLost -- 9 real fields, same real row order the API returns."""
     def fake_post(url, data=None):
         assert data["grant_type"] == "refresh_token"
         return MagicMock(status_code=200, json=lambda: {"access_token": "fake_token"}, raise_for_status=lambda: None)
 
     def fake_get(url, headers=None, params=None):
         assert headers["Authorization"] == "Bearer fake_token"
-        return MagicMock(status_code=200, json=lambda: {"rows": [[245.5, 62.3, 18]]})
+        # Real order: views, estimatedMinutesWatched, likes, comments,
+        # shares, averageViewDuration, averageViewPercentage,
+        # subscribersGained, subscribersLost
+        return MagicMock(status_code=200, json=lambda: {"rows": [[5000, 1200.5, 300, 25, 10, 245.5, 62.3, 18, 2]]})
 
     with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
         records = yt.fetch_video_analytics(["vid1"], date(2026, 8, 1), date(2026, 8, 31))
 
     assert len(records) == 1
-    assert records[0].average_view_duration_seconds == 245.5
-    assert records[0].subscribers_gained == 18
+    r = records[0]
+    assert r.views == 5000
+    assert r.estimated_minutes_watched == 1200.5
+    assert r.likes == 300
+    assert r.average_view_duration_seconds == 245.5
+    assert r.subscribers_gained == 18
+    assert r.subscribers_lost == 2
 
 
 def test_analytics_isolates_one_failing_video_from_the_batch():
@@ -102,13 +115,36 @@ def test_analytics_isolates_one_failing_video_from_the_batch():
     def fake_get(url, headers=None, params=None):
         if params.get("filters") == "video==vid_bad":
             return MagicMock(status_code=403, text="quota exceeded")
-        return MagicMock(status_code=200, json=lambda: {"rows": [[100.0, 50.0, 5]]})
+        return MagicMock(status_code=200, json=lambda: {"rows": [[100, 20.0, 5, 1, 0, 100.0, 50.0, 5, 0]]})
 
     with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
         records = yt.fetch_video_analytics(["vid_bad", "vid_good"], date(2026, 8, 1), date(2026, 8, 31))
 
     assert len(records) == 1
     assert records[0].video_id == "vid_good"
+
+
+def test_fetch_traffic_sources_returns_per_source_breakdown():
+    """Real, confirmed dimension: insightTrafficSourceType, the actual
+    original motivation for building OAuth in the first place."""
+    def fake_post(url, data=None):
+        return MagicMock(status_code=200, json=lambda: {"access_token": "fake_token"}, raise_for_status=lambda: None)
+
+    def fake_get(url, headers=None, params=None):
+        assert params["dimensions"] == "insightTrafficSourceType"
+        return MagicMock(status_code=200, json=lambda: {"rows": [
+            ["YT_SEARCH", 3000, 800.0],
+            ["SUGGESTED_VIDEO", 1500, 400.0],
+            ["EXT_URL", 500, 120.0],
+        ]})
+
+    with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
+        records = yt.fetch_traffic_sources(["vid1"], date(2026, 8, 1), date(2026, 8, 31))
+
+    assert len(records) == 3
+    assert records[0].traffic_source_type == "YT_SEARCH"
+    assert records[0].views == 3000
+    assert records[1].traffic_source_type == "SUGGESTED_VIDEO"
 
 
 if __name__ == "__main__":
@@ -195,3 +231,69 @@ def test_malformed_published_date_uses_sentinel_not_crash():
         result = yt.fetch_video_stats()
     assert len(result) == 1
     assert result[0].published_at == date(1970, 1, 1)
+
+
+# ---------- run() orchestration (Sep 23 2026) ----------
+# REAL, SIGNIFICANT GAP: this connector had every function individually
+# built and tested, but was never actually wired into a runnable entry
+# point -- no run(), no __main__ block. Running `python
+# youtube_connector.py` directly defined functions and exited silently
+# with zero output. Confirmed via Supabase: the two target tables
+# (youtube_video_stats, youtube_video_analytics) didn't exist either,
+# meaning this had genuinely never run end-to-end before.
+
+def test_run_orchestrates_stats_then_analytics_and_writes_both_tables():
+    fake_stats = [yt.YouTubeVideoStats("v1", "Test Video", date(2026, 9, 1), 1000, 50, 5)]
+    fake_analytics = [yt.YouTubeVideoAnalytics("v1", date(2026, 9, 8), 5000, 1200.5, 300, 25, 10, 120.5, 45.0, 2, 0)]
+    fake_traffic = [yt.YouTubeTrafficSource("v1", date(2026, 9, 8), "YT_SEARCH", 3000, 800.0)]
+
+    with patch.object(yt, "fetch_video_stats", return_value=fake_stats), \
+         patch.object(yt, "fetch_video_analytics", return_value=fake_analytics) as mock_analytics, \
+         patch.object(yt, "fetch_traffic_sources", return_value=fake_traffic), \
+         patch("writer.upsert_rows", side_effect=lambda table, rows: len(rows)) as mock_upsert:
+        result = yt.run()
+
+    assert result == 3
+    tables_written = [c.args[0] for c in mock_upsert.call_args_list]
+    assert "youtube_video_stats" in tables_written
+    assert "youtube_video_analytics" in tables_written
+    assert "youtube_traffic_sources" in tables_written
+    # Confirms the real video_id from stats feeds into the analytics call
+    assert mock_analytics.call_args.args[0] == ["v1"]
+
+
+def test_run_skips_analytics_gracefully_when_no_stats_found():
+    with patch.object(yt, "fetch_video_stats", return_value=[]), \
+         patch("writer.upsert_rows", return_value=0):
+        result = yt.run()
+    assert result == 0
+
+
+def test_run_preserves_written_stats_when_analytics_fails():
+    """A revoked/expired OAuth refresh token must not wipe out the
+    real stats data (public, API-key-only) already successfully
+    written before the Analytics (OAuth-required) call was attempted."""
+    fake_stats = [yt.YouTubeVideoStats("v1", "Test", date(2026, 9, 1), 100, 10, 1)]
+
+    with patch.object(yt, "fetch_video_stats", return_value=fake_stats), \
+         patch.object(yt, "fetch_video_analytics", side_effect=RuntimeError("token revoked")), \
+         patch("writer.upsert_rows", return_value=1) as mock_upsert:
+        result = yt.run()
+
+    assert result == 1
+    assert mock_upsert.call_count == 1  # stats written; analytics never reached a write call
+
+
+def test_module_has_a_main_entry_point():
+    """Regression guard for the actual real bug: confirms this file can
+    genuinely be run directly and produce output, not just imported."""
+    import ast
+    tree = ast.parse(open(os.path.join(os.path.dirname(__file__), "..", "youtube_connector.py")).read())
+    has_main_block = any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+        for node in ast.walk(tree)
+    )
+    assert has_main_block, "youtube_connector.py must have an if __name__ == '__main__': block"

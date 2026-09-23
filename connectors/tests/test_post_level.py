@@ -423,14 +423,22 @@ def test_insufficient_viewers_is_never_cached_as_a_permanent_failure():
 
 def test_tiktok_refresh_uses_correct_endpoint_and_field_names():
     """
-    Regression test for a real production bug: the connector called
-    /oauth2/access_token/ (for the initial code exchange) with
-    client_key/client_secret (the WRONG field names for this API) instead
-    of the separate /oauth2/refresh_token/ endpoint with app_id/secret.
-    TikTok's error ("app_id: Missing data for required field") looked like
-    an access-approval problem but was actually this bug. No test
-    previously checked the actual request shape -- every test mocked
-    refresh_access_token() away entirely.
+    Regression test for the real, final fix (Sep 23 2026), sourced
+    directly from TikTok's own official API documentation
+    (ads.tiktok.com/gateway/docs), not inferred from error messages.
+
+    This connector's authorization flow ("TikTok account holder
+    authorization" via www.tiktok.com/v2/auth/authorize) is TikTok's
+    "business_organic" API type. Its token operations use two
+    SEPARATE endpoints, both with client_id/client_secret:
+      - Initial exchange: /tt_user/oauth2/token/       (field: auth_code)
+      - Refresh:          /tt_user/oauth2/refresh_token/ (field: refresh_token)
+
+    A different flow entirely ("marketing" / Advertiser authorization)
+    uses /oauth2/access_token/ and /oauth2/refresh_token/ (no tt_user/
+    prefix) with app_id/secret -- confirmed NOT the flow this connector
+    uses, despite superficially similar-looking endpoint names under
+    the same business-api.tiktok.com host.
     """
     captured = {}
 
@@ -447,12 +455,12 @@ def test_tiktok_refresh_uses_correct_endpoint_and_field_names():
         token = tiktok_connector.refresh_access_token()
 
     assert token == "real_token"
-    assert captured["url"].endswith("/oauth2/refresh_token/")
-    assert "/oauth2/access_token/" not in captured["url"]
-    assert "app_id" in captured["body"]
-    assert "secret" in captured["body"]
-    assert "client_key" not in captured["body"]
-    assert "client_secret" not in captured["body"]
+    assert captured["url"].endswith("/tt_user/oauth2/refresh_token/")
+    assert captured["body"]["client_id"] and captured["body"]["client_secret"]
+    assert captured["body"]["grant_type"] == "refresh_token"
+    assert captured["body"]["refresh_token"] == "test"
+    assert "app_id" not in captured["body"]
+    assert "auth_code" not in captured["body"]
 
 
 def test_tiktok_refresh_diagnostic_shows_real_error_body():
@@ -580,3 +588,44 @@ def test_backfill_historical_posts_excludes_stories():
     mock_stories.assert_not_called()
     mock_ig.assert_called_once_with(max_pages=5)
     mock_fb.assert_called_once_with(max_pages=5)
+
+
+def test_sync_recent_video_metrics_stops_early_when_has_more_false():
+    """Confirms the lightweight sync doesn't walk all pages -- stops
+    as soon as has_more is false, well before the real 90-page count
+    seen in the actual full backfill."""
+    call_count = {"n": 0}
+
+    def fake_get(url, headers, params):
+        call_count["n"] += 1
+        return MagicMock(status_code=200, json=lambda: {
+            "code": 0,
+            "data": {"videos": [{"item_id": f"v{call_count['n']}", "video_views": 1, "likes": 0, "comments": 0, "shares": 0}],
+                      "has_more": False, "cursor": 1}
+        })
+
+    with patch("tiktok_connector.requests.get", side_effect=fake_get), \
+         patch("tiktok_connector.upsert_rows", return_value=1) as mock_upsert:
+        result = tiktok_connector.sync_recent_video_metrics("fake_token")
+
+    assert call_count["n"] == 1, "must stop after the first page when has_more is False"
+    assert result == 1
+    assert mock_upsert.call_args.args[0] == "tiktok_video_metrics"
+
+
+def test_sync_recent_video_metrics_caps_at_five_pages_even_if_has_more_stays_true():
+    """Real safety check: even if TikTok never reports has_more=False,
+    this must stop at RECENT_PAGES (5), not walk all real history like
+    the full backfill does."""
+    def fake_get(url, headers, params):
+        return MagicMock(status_code=200, json=lambda: {
+            "code": 0,
+            "data": {"videos": [{"item_id": "v", "video_views": 1, "likes": 0, "comments": 0, "shares": 0}],
+                      "has_more": True, "cursor": 999}
+        })
+
+    with patch("tiktok_connector.requests.get", side_effect=fake_get) as mock_get, \
+         patch("tiktok_connector.upsert_rows", return_value=5):
+        tiktok_connector.sync_recent_video_metrics("fake_token")
+
+    assert mock_get.call_count == 5, "must cap at 5 pages, not follow has_more indefinitely"
