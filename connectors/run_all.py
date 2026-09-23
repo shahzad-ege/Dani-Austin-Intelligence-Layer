@@ -56,6 +56,7 @@ CONNECTORS = [
     ("manual_affiliate", "manual_affiliate_connector:run"),
     ("manual_podcast", "manual_podcast_connector:run"),
     ("megaphone", "megaphone_connector:run"),
+    ("youtube", "youtube_connector:run"),
 ]
 
 

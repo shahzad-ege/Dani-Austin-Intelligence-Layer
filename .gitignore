@@ -4,6 +4,3 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-client_secret_*.json
-*.apps.googleusercontent.com.json
-*.csv

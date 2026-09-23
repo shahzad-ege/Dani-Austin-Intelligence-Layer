@@ -48,3 +48,46 @@ def test_every_registered_target_names_a_real_module_file():
     for _, target in run_all.CONNECTORS:
         module_name = target.split(":")[0]
         assert os.path.exists(os.path.join(here, f"{module_name}.py")), module_name
+
+
+def test_youtube_is_registered_in_daily_schedule():
+    """Real, specific regression guard: youtube_connector was wired
+    into run_all.py (Sep 23 2026) after being confirmed working
+    end-to-end. Confirms it's actually in the schedule, not just that
+    the module file exists generically."""
+    connector_names = [name for name, _ in run_all.CONNECTORS]
+    assert "youtube" in connector_names
+
+
+def test_youtube_missing_credentials_fails_in_isolation_not_globally():
+    """Real, specific version of the general isolation test: confirms
+    a missing/blank YouTube credential set fails only youtube's own
+    run(), never preventing a DIFFERENT connector later in the list
+    from running -- the exact scenario this connector's own
+    _validate_credentials_not_empty() exists to fail loudly on.
+
+    Patches youtube_connector's MODULE-LEVEL variables directly, not
+    os.environ -- YOUTUBE_API_KEY etc. are read once at import time
+    (matching this project's established pattern), so changing
+    os.environ after the module is already imported elsewhere in the
+    test suite has no effect on the already-captured values."""
+    import youtube_connector as yc
+
+    ran = []
+    good = types.ModuleType("fake_good_connector_yt_test")
+    good.run = lambda: ran.append("good") or 1
+    sys.modules["fake_good_connector_yt_test"] = good
+
+    with patch.object(run_all, "CONNECTORS", [
+        ("youtube", "youtube_connector:run"),
+        ("good", "fake_good_connector_yt_test:run"),
+    ]), \
+    patch.object(yc, "YOUTUBE_API_KEY", ""), \
+    patch.object(yc, "YOUTUBE_CHANNEL_ID", ""), \
+    patch.dict(os.environ, {
+        "DA_SUPABASE_URL": "https://fake.supabase.co", "DA_SUPABASE_SERVICE_KEY": "fake",
+    }, clear=False):
+        exit_code = run_all.main()
+
+    assert ran == ["good"], "the healthy connector after youtube must still run"
+    assert exit_code == 1, "the run as a whole must still report the real failure"

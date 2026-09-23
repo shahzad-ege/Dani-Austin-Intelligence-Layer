@@ -63,6 +63,11 @@ jobs:
           MEGAPHONE_API_TOKEN: ${{ secrets.MEGAPHONE_API_TOKEN }}
           MEGAPHONE_NETWORK_ID: ${{ secrets.MEGAPHONE_NETWORK_ID }}
           MEGAPHONE_PODCAST_ID: ${{ secrets.MEGAPHONE_PODCAST_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          YOUTUBE_OAUTH_CLIENT_ID: ${{ secrets.YOUTUBE_OAUTH_CLIENT_ID }}
+          YOUTUBE_OAUTH_CLIENT_SECRET: ${{ secrets.YOUTUBE_OAUTH_CLIENT_SECRET }}
+          YOUTUBE_OAUTH_REFRESH_TOKEN: ${{ secrets.YOUTUBE_OAUTH_REFRESH_TOKEN }}
           REVENUE_FORECAST_CSV_PATH: data/revenue_forecast.csv
           CASH_FLOW_FORECAST_CSV_PATH: data/cash_flow_forecast.csv
           AFFILIATE_REVENUE_CSV_PATH: data/affiliate_revenue.csv
