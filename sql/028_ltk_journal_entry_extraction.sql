@@ -1,0 +1,41 @@
+-- ============================================================
+-- Migration 028: LTK/Platform Affiliate JournalEntry extraction (Sep 2026)
+-- ============================================================
+-- No schema change -- documented here for the record.
+--
+-- REAL, CONFIRMED FINDING: "Platform Affiliate:Platform Affiliate -
+-- LTK" had zero transactions for all of 2023-2026, despite being
+-- correctly classified. Root cause confirmed via a live diagnostic:
+-- LTK/RewardStyle revenue moved from simple Deposit transactions to
+-- being recorded via JournalEntry starting sometime in 2023 -- the
+-- exact same blind spot that hid payroll, now confirmed to also hide
+-- LTK commission revenue. Matches Katelyn's own real description
+-- (direct call, Sep 2026) of recording LTK via "adjusting entries":
+-- estimate monthly, true up ~90 days later against LTK's real
+-- analytics, net of an ~20-23% return rate.
+--
+-- Real entry structure confirmed: EntityRef.name = "RewardStyle" (the
+-- real customer name -- explains why an earlier search of the ACCOUNT
+-- field for "RewardStyle" found nothing; it's the entity, not the
+-- account). Each entry pairs a real revenue line (Credit to the LTK
+-- account for gross earnings, or Debit for a returns adjustment) with
+-- an Accounts Receivable (A/R) line.
+--
+-- extract_platform_affiliate_journal_lines() added to qb_connector.py,
+-- deliberately scoped to the exact confirmed account name only --
+-- verified via a real test that a differently-named Platform Affiliate
+-- account (e.g. Amazon) is NOT swept in by a loose prefix match.
+-- Verified against the real entry: gross $12,498.54 (Credit) minus a
+-- $2,499.71 returns adjustment (Debit) nets to $9,998.83 for August
+-- 2026 -- consistent with Katelyn's stated ~20-23% return rate.
+--
+-- Sign convention is the OPPOSITE of the payroll extractor's, since
+-- this is revenue not expense: Credit=positive, Debit=negative.
+--
+-- extract_journal_entry_lines_combined() added as a single dispatcher
+-- calling both the payroll and LTK extractors from one JournalEntry
+-- fetch -- deliberately not two separate ENTITY_CONFIG rows both
+-- mapped to "JournalEntry", which would fetch the same real journal
+-- entries twice from the QB API for no correctness benefit.
+-- backfill_journal_entries() updated to use the combined extractor too,
+-- so a future historical backfill captures LTK revenue, not just payroll.

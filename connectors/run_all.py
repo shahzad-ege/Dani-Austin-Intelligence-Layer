@@ -7,8 +7,10 @@ block the others from running and doesn't crash the whole job.
 
 Currently wired: QuickBooks, Airtable, Social Blade, Meta, TikTok, Brex,
 PayPal (both DA accounts), Plaid/Chase (filtered from a shared multi-entity
-token), Xpoz earned-mentions tracking, and the manual CSV-ingestion
-connectors (forecast, affiliate, podcast placeholder).
+token), Megaphone episode metadata, and the manual CSV-ingestion
+connectors (forecast, affiliate, podcast placeholder). Xpoz earned-mentions
+tracking runs on its own separate weekly schedule
+(.github/workflows/xpoz-weekly-sync.yml), NOT here -- see the note below.
 
 Still needs real credentials/access before it does anything useful:
     - Meta            -- needs META_SYSTEM_USER_TOKEN etc.; App Review pending
@@ -22,45 +24,51 @@ Not yet wired at all:
 """
 
 import sys
+import importlib
 import traceback
 
-import qb_connector
-import airtable_connector
-import social_blade_connector
-import meta_connector
-import tiktok_connector
-import brex_connector
-import paypal_connector
-import plaid_connector
-import manual_forecast_connector
-import manual_affiliate_connector
-import manual_podcast_connector
-# xpoz_connector deliberately NOT imported/registered here -- it runs
-# on its own weekly schedule (.github/workflows/xpoz-weekly-sync.yml),
-# same pattern as post-level-sync.yml's separate 12-hourly cadence.
-# Including it here would run it daily, exceeding the ~20% monthly
-# budget target it was specifically sized for at weekly frequency.
-
+# xpoz_connector deliberately NOT registered here -- it runs on its own
+# weekly schedule (.github/workflows/xpoz-weekly-sync.yml), same pattern
+# as post-level-sync.yml's separate 12-hourly cadence. Including it here
+# would run it daily, exceeding the ~20% monthly budget target it was
+# specifically sized for at weekly frequency.
+#
+# REAL FIX (Sep 23 2026 audit): connectors are now imported LAZILY,
+# inside each one's own try/except, not at the top of this file. Six
+# connectors read required env vars at module level (os.environ["X"]),
+# so a single missing secret used to raise KeyError during import --
+# killing the ENTIRE daily sync before any connector ran. Confirmed by
+# simulating the real daily-sync.yml environment: megaphone_connector
+# was registered here, but daily-sync.yml never passes MEGAPHONE_*
+# secrets, so the next push would have broken every connector at once.
+# Now a missing secret fails only its own connector.
 CONNECTORS = [
-    ("quickbooks", qb_connector.run),
-    ("quickbooks_ar_aging", qb_connector.sync_ar_aging),
-    ("airtable", airtable_connector.run),
-    ("social_blade", social_blade_connector.run),
-    ("meta", meta_connector.run),
-    ("tiktok", tiktok_connector.run),
-    ("brex", brex_connector.run),
-    ("paypal", paypal_connector.run),
-    ("plaid", plaid_connector.run),
-    ("manual_forecast", manual_forecast_connector.run),
-    ("manual_affiliate", manual_affiliate_connector.run),
-    ("manual_podcast", manual_podcast_connector.run),
+    ("quickbooks", "qb_connector:run"),
+    ("quickbooks_ar_aging", "qb_connector:sync_ar_aging"),
+    ("airtable", "airtable_connector:run"),
+    ("social_blade", "social_blade_connector:run"),
+    ("meta", "meta_connector:run"),
+    ("tiktok", "tiktok_connector:run"),
+    ("brex", "brex_connector:run"),
+    ("paypal", "paypal_connector:run"),
+    ("plaid", "plaid_connector:run"),
+    ("manual_forecast", "manual_forecast_connector:run"),
+    ("manual_affiliate", "manual_affiliate_connector:run"),
+    ("manual_podcast", "manual_podcast_connector:run"),
+    ("megaphone", "megaphone_connector:run"),
 ]
+
+
+def _resolve(target: str):
+    module_name, fn_name = target.split(":")
+    return getattr(importlib.import_module(module_name), fn_name)
 
 
 def main() -> int:
     exit_code = 0
-    for name, run_fn in CONNECTORS:
+    for name, target in CONNECTORS:
         try:
+            run_fn = _resolve(target)  # import happens HERE, isolated per connector
             count = run_fn()
             print(f"[{name}] OK — {count} rows upserted")
         except Exception:

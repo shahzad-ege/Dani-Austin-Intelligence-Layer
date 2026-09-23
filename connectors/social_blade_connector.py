@@ -77,15 +77,42 @@ def seed_accounts() -> int:
     return upsert_rows("social_accounts", [a.to_row() for a in SEED_ACCOUNTS])
 
 
-def fetch_statistics(platform: str, handle: str) -> dict:
-    """Pulls current statistics for one handle on one platform."""
+def fetch_statistics(platform: str, handle: str, history: str | None = None) -> dict:
+    """Pulls current statistics for one handle on one platform.
+
+    REAL FINDING (Sep 2026), confirmed directly from Social Blade's own
+    official API schema: the `daily[]` array's ~30-day depth has NOTHING
+    to do with subscription tier (Silver's 60-day dashboard benefit
+    doesn't apply here, confirmed by a real live test). It's controlled
+    entirely by this `history` request parameter, which this function
+    never sent before -- meaning every call has always silently used the
+    free "default" tier (1 credit, 30 days) regardless of account tier.
+
+    Confirmed real values, each a genuinely higher-cost, deeper pull:
+      - None/"default" -- 1 credit, 30 days (existing behavior, unchanged)
+      - "extended"      -- 2 credits, up to 1 year
+      - "archive"       -- 3 credits, up to 3 years
+      - "vault"         -- 5 credits, up to 10 years (TikTok/IG/FB;
+                            YouTube caps at 3 years via "archive")
+
+    Real cost note: a profile lookup at ANY tier is free to re-check for
+    the next 30 days -- the credit is spent once per lookup, not per
+    day. Deliberately defaults to None (unchanged, free, 30-day
+    behavior) -- fetching deeper history costs real, limited credits and
+    should be a deliberate choice, not something that happens by
+    default on every routine daily sync call.
+    """
+    params = {"query": handle}
+    if history:
+        params["history"] = history
+
     resp = requests.get(
         f"{SOCIALBLADE_BASE_URL}/{platform}/statistics",
         headers={
             "clientid": SOCIALBLADE_CLIENT_ID,
             "token": SOCIALBLADE_TOKEN,
         },
-        params={"query": handle},
+        params=params,
     )
     resp.raise_for_status()
     payload = resp.json()
@@ -174,6 +201,102 @@ def backfill_from_daily_history(max_days: int | None = None) -> int:
             print(f"[social_blade] backfill: '{account.platform}' -- {len(daily_entries)} day(s), {written} row(s) written")
 
     return total_written
+
+
+HISTORY_COSTS = {"extended": 2, "archive": 3, "vault": 5}
+
+
+def deep_history_backfill(platform: str, history: str = "extended", confirm_cost: bool = False) -> int:
+    """
+    Deliberate, ONE-TIME pull of real historical data far beyond the
+    free 30-day daily[] window -- confirmed directly from Social Blade's
+    own official API schema (Sep 2026): the `history` parameter controls
+    this, completely independent of subscription tier. Real, confirmed
+    depths: "extended"=1yr (2 credits), "archive"=3yr (3 credits),
+    "vault"=10yr for TikTok/IG/FB, 3yr max for YouTube (5 credits).
+
+    UNLIKE backfill_from_daily_history() (free, safe to run anytime),
+    this spends real, limited Business API credits -- Silver tier
+    provides only 5/month total. Deliberately requires confirm_cost=True
+    to actually run, so this can never be triggered accidentally by
+    routine automation; this is meant to be called by hand, once, when
+    genuinely wanted, not part of any scheduled sync.
+
+    Reuses the same field-mapping and date-parsing logic already proven
+    correct in backfill_from_daily_history() -- this function differs
+    only in requesting a deeper `history` tier, not in how the response
+    is parsed.
+    """
+    if history not in HISTORY_COSTS:
+        raise ValueError(f"history must be one of {list(HISTORY_COSTS)}, got {history!r}")
+
+    cost = HISTORY_COSTS[history]
+    if not confirm_cost:
+        print(f"[social_blade] deep_history_backfill for '{platform}' with history={history!r} "
+              f"costs {cost} real credit(s), taken from Silver's limited 5/month allowance. "
+              f"Call again with confirm_cost=True to actually spend it.")
+        return 0
+
+    account = next((a for a in SEED_ACCOUNTS if a.platform == platform), None)
+    if account is None:
+        print(f"[social_blade] No seed account found for platform {platform!r}")
+        return 0
+
+    try:
+        stats = fetch_statistics(account.platform, account.handle, history=history)
+    except requests.HTTPError as e:
+        print(f"[social_blade] deep backfill: '{platform}' FAILED (credit still likely spent -- check your balance): {e}")
+        return 0
+
+    # REAL FIX: previously required guessing/calculating the remaining
+    # balance externally from assumed tier limits -- which turned out
+    # wrong in practice (a Facebook pull succeeded when external math
+    # predicted insufficient credits). The API response already reports
+    # the real, live balance directly -- surfacing it here removes the
+    # need to guess at all going forward.
+    credits_left = stats.get("info", {}).get("credits", {}).get("available")
+    if credits_left is not None:
+        print(f"[social_blade] Real credit balance after this call: {credits_left}")
+
+    daily_entries = stats.get("data", {}).get("daily", [])
+    if not daily_entries:
+        print(f"[social_blade] deep backfill: '{platform}' returned no daily[] array despite the deeper request")
+        return 0
+
+    field_map = FIELD_MAP.get(account.platform, {})
+    records: list[SocialMetric] = []
+
+    for entry in daily_entries:
+        raw_date = entry.get("date")
+        if not raw_date:
+            continue
+        try:
+            entry_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).date()
+        except ValueError:
+            print(f"[social_blade] deep backfill: unparseable date {raw_date!r} -- skipping this entry")
+            continue
+
+        for our_metric, sb_field in field_map.items():
+            value = entry.get(sb_field)
+            if value is None:
+                continue
+            records.append(
+                SocialMetric(
+                    account_id=account.account_id,
+                    metric=our_metric,
+                    period_date=entry_date,
+                    value=float(value),
+                    source="social_blade",
+                )
+            )
+
+    if not records:
+        return 0
+
+    written = upsert_rows("social_metrics", [r.to_row() for r in records])
+    print(f"[social_blade] deep backfill: '{platform}' -- {len(daily_entries)} real day(s) of history, {written} row(s) written "
+          f"(spent {cost} credit(s))")
+    return written
 
 
 def run() -> int:

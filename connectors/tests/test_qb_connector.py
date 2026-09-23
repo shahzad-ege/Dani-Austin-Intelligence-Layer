@@ -226,7 +226,7 @@ def test_run_queries_all_five_entity_types_and_writes_combined_result():
         assert count == 3
         written = mock_upsert.call_args[0][1]
         assert len(written) == 3  # 2 from the Bill, 1 from the Invoice
-        assert mock_query.call_count == 5  # Purchase, Bill, Invoice, SalesReceipt, Deposit
+        assert mock_query.call_count == 7  # Purchase, Bill, Invoice, SalesReceipt, Deposit, JournalEntry, CreditMemo
 
 
 if __name__ == "__main__":
@@ -414,3 +414,163 @@ def test_snapshot_rows_include_balance_for_settlement_comparison():
         snapshot_rows = snapshot_call.args[1]
         assert snapshot_rows[0]["qb_invoice_id"] == "5001"
         assert snapshot_rows[0]["balance"] == 5000.00
+
+
+# ---------- LTK/Platform Affiliate journal entry extraction (real RewardStyle data, Sep 2026) ----------
+
+def _make_je_line_platform(line_id, amount, posting_type, account_name, memo=None):
+    return {"Id": line_id, "Amount": amount, "Description": memo,
+            "JournalEntryLineDetail": {"PostingType": posting_type, "AccountRef": {"name": account_name},
+                                        "Entity": {"Type": "Customer", "EntityRef": {"name": "RewardStyle"}}}}
+
+
+def test_real_ltk_journal_entry_extracts_correctly():
+    """Built from an actual live QuickBooks JournalEntry (Sep 2026).
+    Confirms A/R lines are excluded, sign convention is correct for
+    revenue (opposite of payroll's expense convention), and net
+    revenue matches the real confirmed figure exactly."""
+    real_entry = {
+        "Id": "41547", "TxnDate": "2026-08-31",
+        "Line": [
+            _make_je_line_platform("0", 12498.54, "Debit", "Accounts Receivable (A/R)"),
+            _make_je_line_platform("1", 12498.54, "Credit", "Platform Affiliate:Platform Affiliate - LTK", "gross earnings"),
+            _make_je_line_platform("2", 0.0, "Debit", "Accounts Receivable (A/R)"),
+            _make_je_line_platform("3", 0.0, "Debit", "Platform Affiliate:Platform Affiliate - LTK", "bonus estimate"),
+            _make_je_line_platform("4", 2499.71, "Credit", "Accounts Receivable (A/R)"),
+            _make_je_line_platform("5", 2499.71, "Debit", "Platform Affiliate:Platform Affiliate - LTK", "returns adjustment"),
+        ]
+    }
+    result = qb_connector.extract_platform_affiliate_journal_lines(real_entry, "JournalEntry")
+
+    assert len(result) == 3
+    assert "Accounts Receivable (A/R)" not in {r.account for r in result}
+    assert all(r.category == "income" for r in result)
+    assert all(r.source == "Affiliate" for r in result)
+
+    net = sum(r.amount for r in result)
+    assert abs(net - 9998.83) < 0.01
+
+
+def test_ltk_extractor_does_not_sweep_up_other_platform_affiliate_accounts():
+    """REAL scoping test: confirms this is an exact-match to the LTK
+    account specifically, not a loose prefix match that would also
+    (incorrectly) pull in Amazon or other Platform Affiliate accounts
+    without their own confirmed real journal-entry structure."""
+    amazon_entry = {
+        "Id": "500", "TxnDate": "2026-09-01",
+        "Line": [_make_je_line_platform("0", 1500, "Credit", "Platform Affiliate:Platform Affiliate - Amazon")]
+    }
+    result = qb_connector.extract_platform_affiliate_journal_lines(amazon_entry, "JournalEntry")
+    assert result == []
+
+
+def test_ltk_extractor_skips_unrelated_journal_entries():
+    jd_rodgers_entry = {
+        "Id": "41429", "TxnDate": "2026-09-03",
+        "Line": [_make_je_line_platform("0", 250.0, "Debit", "Contractors:Creative & Marketing Contractors")]
+    }
+    result = qb_connector.extract_platform_affiliate_journal_lines(jd_rodgers_entry, "JournalEntry")
+    assert result == []
+
+
+def test_combined_extractor_handles_payroll_only_entry():
+    payroll_entry = {
+        "Id": "999", "TxnDate": "2026-09-15",
+        "Line": [{"Id": "0", "Amount": 100, "JournalEntryLineDetail": {"PostingType": "Debit", "AccountRef": {"name": "Payroll:Salaries & Wages"}}}]
+    }
+    with patch("qb_connector.extract_business_unit", return_value="Overhead"):
+        result = qb_connector.extract_journal_entry_lines_combined(payroll_entry, "JournalEntry")
+    assert len(result) == 1
+    assert result[0].account == "Payroll:Salaries & Wages"
+
+
+def test_combined_extractor_handles_ltk_only_entry():
+    ltk_entry = {
+        "Id": "41547", "TxnDate": "2026-08-31",
+        "Line": [_make_je_line_platform("0", 5000, "Credit", "Platform Affiliate:Platform Affiliate - LTK")]
+    }
+    result = qb_connector.extract_journal_entry_lines_combined(ltk_entry, "JournalEntry")
+    assert len(result) == 1
+    assert result[0].account == "Platform Affiliate:Platform Affiliate - LTK"
+    assert result[0].amount == 5000.0
+
+
+def test_journal_entry_config_uses_combined_extractor_not_duplicated():
+    """Confirms JournalEntry appears exactly once in ENTITY_CONFIG,
+    using the combined dispatcher -- not twice (which would waste a
+    real API call fetching the same journal entries redundantly)."""
+    je_entries = [e for e in qb_connector.ENTITY_CONFIG if e[0] == "JournalEntry"]
+    assert len(je_entries) == 1
+    assert je_entries[0][1] == qb_connector.extract_journal_entry_lines_combined
+
+
+def test_ltk_extractor_malformed_entry_handled_gracefully():
+    bad_entry = {"Line": [_make_je_line_platform("0", 100, "Credit", "Platform Affiliate:Platform Affiliate - LTK")]}
+    result = qb_connector.extract_platform_affiliate_journal_lines(bad_entry, "JournalEntry")
+    assert result == []
+
+
+# ---------- CreditMemo extraction (real bad debt / revenue credit data, Sep 2026) ----------
+
+def test_real_bad_debt_credit_memo_extracts_correctly():
+    """Built from the actual real CreditMemo (Id 24045, CEG/Fit Track,
+    Sep 2026 diagnostic). Confirms ItemAccountRef (not ItemRef) is used
+    as the real account, category correctly detected as expense, and
+    SubTotalLineDetail lines are correctly skipped."""
+    real_entry = {
+        "Id": "24045", "TxnDate": "2023-04-04", "PrivateNote": "Bed Debt",
+        "Line": [
+            {"Id": "1", "Amount": 15000.0, "SalesItemLineDetail": {
+                "ItemRef": {"name": "Bad Debts"},
+                "ItemAccountRef": {"name": "Other General & Administrative Expenses:Bad Debt Expense"},
+            }},
+            {"Amount": 15000.0, "DetailType": "SubTotalLineDetail", "SubTotalLineDetail": {}},
+        ]
+    }
+    with patch("qb_connector.extract_business_unit", return_value="Overhead"):
+        result = qb_connector.extract_credit_memo_lines(real_entry, "CreditMemo")
+
+    assert len(result) == 1
+    assert result[0].account == "Other General & Administrative Expenses:Bad Debt Expense"
+    assert result[0].category == "expense"
+    assert result[0].amount == -15000.0
+    assert result[0].memo == "Bed Debt"
+
+
+def test_real_brand_partnership_credit_memo_extracts_as_income():
+    real_entry = {
+        "Id": "24200", "TxnDate": "2024-01-15",
+        "Line": [{"Id": "1", "Amount": 1200.0, "SalesItemLineDetail": {
+            "ItemRef": {"name": "Brand Partnership"}, "ItemAccountRef": {"name": "Brand Partnership"}
+        }}]
+    }
+    with patch("qb_connector.extract_business_unit", return_value="Partnerships"):
+        result = qb_connector.extract_credit_memo_lines(real_entry, "CreditMemo")
+
+    assert len(result) == 1
+    assert result[0].category == "income"
+    assert result[0].amount == -1200.0
+
+
+def test_credit_memo_missing_id_or_date_handled_gracefully():
+    bad = {"Line": [{"Amount": 100, "SalesItemLineDetail": {"ItemAccountRef": {"name": "Some Expense"}}}]}
+    assert qb_connector.extract_credit_memo_lines(bad, "CreditMemo") == []
+
+
+def test_credit_memo_missing_item_account_ref_handled_gracefully():
+    bad = {"Id": "1", "TxnDate": "2024-01-01",
+           "Line": [{"Amount": 100, "SalesItemLineDetail": {"ItemRef": {"name": "X"}}}]}
+    assert qb_connector.extract_credit_memo_lines(bad, "CreditMemo") == []
+
+
+def test_credit_memo_subtotal_only_line_skipped():
+    entry = {"Id": "1", "TxnDate": "2024-01-01",
+             "Line": [{"Amount": 100, "DetailType": "SubTotalLineDetail", "SubTotalLineDetail": {}}]}
+    assert qb_connector.extract_credit_memo_lines(entry, "CreditMemo") == []
+
+
+def test_credit_memo_registered_in_entity_config():
+    entity_names = [name for name, _ in qb_connector.ENTITY_CONFIG]
+    assert "CreditMemo" in entity_names
+    idx = entity_names.index("CreditMemo")
+    assert qb_connector.ENTITY_CONFIG[idx][1] == qb_connector.extract_credit_memo_lines

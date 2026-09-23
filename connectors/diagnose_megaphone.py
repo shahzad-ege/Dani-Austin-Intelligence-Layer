@@ -30,13 +30,39 @@ Run with: python diagnose_megaphone.py
 import os
 import json
 import requests
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+# REAL BUG, same class already found and fixed twice elsewhere in this
+# project (db.py, xpoz_connector.py): plain load_dotenv() can silently
+# fail to find .env depending on the working directory a script is
+# actually run from. find_dotenv(usecwd=True) searches from the real
+# current directory instead.
+load_dotenv(find_dotenv(usecwd=True))
 
-MEGAPHONE_API_TOKEN = os.environ["MEGAPHONE_API_TOKEN"]
-MEGAPHONE_NETWORK_ID = os.environ["MEGAPHONE_NETWORK_ID"]
-MEGAPHONE_PODCAST_ID = os.environ["MEGAPHONE_PODCAST_ID"]
+
+def _require_nonblank(name: str) -> str:
+    """REAL BUG PATTERN, already confirmed to have bitten this project
+    twice (TikTok's blank TIKTOK_BUSINESS_ID, Airtable's blank
+    AIRTABLE_TABLE_NAME): a GitHub Secret or .env entry can exist but be
+    blank, which os.environ[...] happily returns as an empty string
+    rather than raising. That produces a confusing downstream 401/403
+    instead of a clear, immediate, actionable message. Checking this
+    proactively here rather than waiting for it to bite a third time."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(
+            f"{name} is not set or is blank. Check your .env file (or the "
+            f"real GitHub Secret if running in CI) actually has a real "
+            f"value -- a variable that EXISTS but is empty won't raise a "
+            f"normal 'missing' error, it'll just silently fail later with "
+            f"a confusing auth error."
+        )
+    return value
+
+
+MEGAPHONE_API_TOKEN = _require_nonblank("MEGAPHONE_API_TOKEN")
+MEGAPHONE_NETWORK_ID = _require_nonblank("MEGAPHONE_NETWORK_ID")
+MEGAPHONE_PODCAST_ID = _require_nonblank("MEGAPHONE_PODCAST_ID")
 BASE_URL = "https://cms.megaphone.fm/api"
 
 
@@ -44,10 +70,22 @@ def main() -> None:
     url = f"{BASE_URL}/networks/{MEGAPHONE_NETWORK_ID}/podcasts/{MEGAPHONE_PODCAST_ID}/episodes"
     print(f"Requesting: {url}\n")
 
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Token {MEGAPHONE_API_TOKEN}"},
-    )
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Token {MEGAPHONE_API_TOKEN}"},
+            timeout=30,  # REAL GAP FOUND in review: no timeout meant a
+            # hung Megaphone server could block this script indefinitely
+            # with no error and no way to tell what's happening.
+        )
+    except requests.Timeout:
+        print("FAILED: request timed out after 30 seconds. Megaphone's")
+        print("API may be down, or there's a network issue -- this isn't")
+        print("an auth/config problem, worth just trying again.")
+        return
+    except requests.ConnectionError as e:
+        print(f"FAILED: could not connect at all: {e}")
+        return
 
     print(f"Status: {resp.status_code}\n")
 

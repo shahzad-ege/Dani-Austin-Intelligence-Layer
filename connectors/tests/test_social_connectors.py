@@ -652,3 +652,59 @@ def test_facebook_demographics_date_matches_meta_documented_example():
     city_records = [r for r in records if r.dimension == "city"]
     assert len(city_records) == 1
     assert str(city_records[0].period_date) == "2020-11-20"
+
+
+# ---------- Social Blade deep history backfill (real credits, confirmed via official docs) ----------
+
+def test_deep_history_requires_explicit_confirmation():
+    """Real, limited credits are at stake (Silver: 5/month total) --
+    this must never spend one without explicit confirm_cost=True, so
+    routine automation could never accidentally trigger a real charge."""
+    with patch("requests.get") as mock_get:
+        result = social_blade_connector.deep_history_backfill("tiktok", history="vault")
+    assert result == 0
+    assert not mock_get.called
+
+
+def test_deep_history_rejects_invalid_tier():
+    try:
+        social_blade_connector.deep_history_backfill("tiktok", history="fake_tier", confirm_cost=True)
+        assert False, "should have raised"
+    except ValueError:
+        pass
+
+
+def test_deep_history_passes_real_history_param_and_writes_data():
+    """Confirmed directly from Social Blade's own official API schema:
+    the history parameter (not subscription tier) controls real depth --
+    default=30 days/1 credit, extended=1yr/2cr, archive=3yr/3cr,
+    vault=10yr/5cr (TikTok/IG/FB; YouTube caps at 3yr via archive)."""
+    real_response = {
+        "data": {"daily": [
+            {"date": "2023-01-15T00:00:00.000Z", "followers": 800000, "likes": 30000000, "uploads": 900},
+        ]}
+    }
+    tiktok_only = [a for a in social_blade_connector.SEED_ACCOUNTS if a.platform == "tiktok"]
+
+    with patch("social_blade_connector.SEED_ACCOUNTS", tiktok_only), \
+         patch("social_blade_connector.fetch_statistics", return_value=real_response) as mock_fetch, \
+         patch("social_blade_connector.upsert_rows", return_value=3):
+        result = social_blade_connector.deep_history_backfill("tiktok", history="vault", confirm_cost=True)
+
+    assert result == 3
+    assert mock_fetch.call_args.kwargs.get("history") == "vault"
+
+
+def test_fetch_statistics_omits_history_param_by_default():
+    """Existing/default behavior must stay completely unchanged --
+    routine daily calls should never accidentally request (and pay
+    for) deeper history."""
+    captured = {}
+    def fake_get(url, headers=None, params=None):
+        captured.update(params)
+        return MagicMock(status_code=200, json=lambda: {"data": {}, "info": {"credits": {"available": 50}}})
+
+    with patch("requests.get", side_effect=fake_get):
+        social_blade_connector.fetch_statistics("tiktok", "testuser")
+
+    assert "history" not in captured

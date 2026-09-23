@@ -140,8 +140,26 @@ def _get_uploads_playlist_id() -> str:
 
 def fetch_video_stats(max_videos: int = 50) -> list[YouTubeVideoStats]:
     """Data API v3 -- public video stats (views/likes/comments). No OAuth
-    needed, just the API key."""
-    uploads_playlist_id = _get_uploads_playlist_id()
+    needed, just the API key.
+
+    REAL GAP FOUND in review (Sep 2026): this function had zero error
+    handling, unlike fetch_video_analytics() which isolates failures
+    per-video. A single failed call anywhere (quota exceeded, rate
+    limit, transient network error) would crash the whole function and
+    lose every video's data, not just one. Fixed to fail gracefully at
+    each stage and return whatever was successfully collected, matching
+    the resilience pattern used throughout this project (e.g.
+    fetch_all_mentions isolating one platform's failure from the rest)."""
+    try:
+        uploads_playlist_id = _get_uploads_playlist_id()
+    except (requests.HTTPError, requests.ConnectionError) as e:
+        # Transient/API-level failures (quota, network) -- fail gracefully.
+        # Deliberately does NOT catch RuntimeError here: a "channel not
+        # found" error means the CHANNEL_ID is misconfigured, which is
+        # worth surfacing loudly and immediately, not silently swallowing
+        # into an empty result the way a transient failure should be.
+        print(f"[youtube] Could not resolve uploads playlist -- aborting: {type(e).__name__}: {e}")
+        return []
 
     video_ids = []
     page_token = None
@@ -155,8 +173,13 @@ def fetch_video_stats(max_videos: int = 50) -> list[YouTubeVideoStats]:
         if page_token:
             params["pageToken"] = page_token
 
-        resp = requests.get(f"{DATA_API_BASE}/playlistItems", params=params)
-        resp.raise_for_status()
+        try:
+            resp = requests.get(f"{DATA_API_BASE}/playlistItems", params=params)
+            resp.raise_for_status()
+        except (requests.HTTPError, requests.ConnectionError) as e:
+            print(f"[youtube] playlistItems fetch failed -- stopping pagination, keeping {len(video_ids)} video(s) already found: {type(e).__name__}: {e}")
+            break
+
         data = resp.json()
         video_ids.extend(item["contentDetails"]["videoId"] for item in data.get("items", []))
         page_token = data.get("nextPageToken")
@@ -169,18 +192,32 @@ def fetch_video_stats(max_videos: int = 50) -> list[YouTubeVideoStats]:
     records = []
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i + 50]
-        resp = requests.get(
-            f"{DATA_API_BASE}/videos",
-            params={"part": "snippet,statistics", "id": ",".join(batch), "key": YOUTUBE_API_KEY},
-        )
-        resp.raise_for_status()
+        try:
+            resp = requests.get(
+                f"{DATA_API_BASE}/videos",
+                params={"part": "snippet,statistics", "id": ",".join(batch), "key": YOUTUBE_API_KEY},
+            )
+            resp.raise_for_status()
+        except (requests.HTTPError, requests.ConnectionError) as e:
+            print(f"[youtube] videos.list batch failed -- skipping this batch of {len(batch)}, continuing with others: {type(e).__name__}: {e}")
+            continue
+
         for item in resp.json().get("items", []):
             snippet = item.get("snippet", {})
             stats = item.get("statistics", {})
             try:
                 published = datetime.fromisoformat(snippet["publishedAt"].replace("Z", "+00:00")).date()
             except (ValueError, KeyError):
-                published = date.fromisoformat(snippet.get("publishedAt", "1970-01-01")[:10])
+                try:
+                    published = date.fromisoformat(snippet.get("publishedAt", "1970-01-01")[:10])
+                except ValueError:
+                    # REAL GAP FOUND in review: the fallback itself had
+                    # no protection -- a genuinely malformed date string
+                    # would still crash the whole batch. Now falls back
+                    # to a clearly-flagged sentinel date rather than
+                    # crashing, so one bad record doesn't lose the rest.
+                    print(f"[youtube] video {item.get('id', '?')}: unparseable publishedAt {snippet.get('publishedAt')!r}, using sentinel date")
+                    published = date(1970, 1, 1)
 
             records.append(
                 YouTubeVideoStats(
@@ -199,7 +236,14 @@ def fetch_video_stats(max_videos: int = 50) -> list[YouTubeVideoStats]:
 def _get_oauth_access_token() -> str:
     """Exchanges the long-lived refresh token for a short-lived access
     token -- standard OAuth 2.0 pattern, required for every Analytics API
-    call since access tokens expire (~1 hour)."""
+    call since access tokens expire (~1 hour).
+
+    REAL GAP FOUND in review (Sep 2026): no error handling here meant a
+    revoked/expired refresh token (a real, plausible failure mode --
+    password changes, Google security reviews) would raise a raw,
+    unhelpful HTTP error. Now raises a clear, actionable message
+    matching the pattern already used for TikTok's credential
+    validation elsewhere in this project."""
     resp = requests.post(
         OAUTH_TOKEN_URL,
         data={
@@ -209,7 +253,13 @@ def _get_oauth_access_token() -> str:
             "grant_type": "refresh_token",
         },
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"YouTube OAuth token refresh failed ({resp.status_code}): {resp.text}. "
+            "This usually means the refresh token was revoked (a Google password "
+            "change or security review can do this) -- the OAuth consent flow "
+            "needs to be redone by the channel owner to get a new refresh token."
+        )
     return resp.json()["access_token"]
 
 

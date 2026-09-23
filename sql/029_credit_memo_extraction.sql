@@ -1,0 +1,40 @@
+-- ============================================================
+-- Migration 029: CreditMemo extraction (Sep 2026)
+-- ============================================================
+-- No schema change -- documented here for the record.
+--
+-- Found via systematic sweep of QuickBooks entity types this connector
+-- had never queried (the same discipline that found payroll and LTK
+-- before it). Real, confirmed data: 6 CreditMemo records, 2018-2026,
+-- $115,929.31 total.
+--
+-- REAL, IMPORTANT CORRECTION to the original hypothesis: CreditMemo
+-- was expected to mean revenue was overstated. The real breakdown
+-- shows the opposite emphasis -- 99% ($114,729.31) is Bad Debt
+-- write-offs (a real customer, CEG/Fit Track, never paid an
+-- already-booked invoice), mapped to a genuine EXPENSE account. Only
+-- $1,200.00 (Brand Partnership) is a genuine revenue-reduction credit.
+-- Missing this data means expenses were UNDERSTATED, not that revenue
+-- was overstated.
+--
+-- extract_credit_memo_lines() added to qb_connector.py. Real structural
+-- difference from other entity types: CreditMemo lines use
+-- SalesItemLineDetail with an ItemRef (product/service label, e.g.
+-- "Bad Debts") AND a separate ItemAccountRef pointing to the real
+-- chart-of-accounts entry (e.g. "Other General & Administrative
+-- Expenses:Bad Debt Expense") -- ItemAccountRef.name is used as the
+-- real "account" field, not ItemRef.name.
+--
+-- Category determined by a real, generalizable heuristic: an account
+-- name containing "expense" (matching this company's own established
+-- naming convention -- Bad Debt Expense, Payroll Tax Expense, Health
+-- Benefits Expense) is category='expense'; otherwise 'income'. Amount
+-- is always stored negative regardless of category, since a credit
+-- memo line always represents a reduction (increasing expense or
+-- decreasing income), unlike JournalEntry where sign depends on
+-- Debit vs Credit.
+--
+-- Verified against the real record: Bad Debt line -> account="Other
+-- General & Administrative Expenses:Bad Debt Expense", category=
+-- expense, amount=-15000.0. SubTotalLineDetail lines correctly
+-- excluded (no SalesItemLineDetail present).

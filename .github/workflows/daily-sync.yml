@@ -60,6 +60,9 @@ jobs:
           TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
           TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
           TIKTOK_BUSINESS_ID: ${{ secrets.TIKTOK_BUSINESS_ID }}
+          MEGAPHONE_API_TOKEN: ${{ secrets.MEGAPHONE_API_TOKEN }}
+          MEGAPHONE_NETWORK_ID: ${{ secrets.MEGAPHONE_NETWORK_ID }}
+          MEGAPHONE_PODCAST_ID: ${{ secrets.MEGAPHONE_PODCAST_ID }}
           REVENUE_FORECAST_CSV_PATH: data/revenue_forecast.csv
           CASH_FLOW_FORECAST_CSV_PATH: data/cash_flow_forecast.csv
           AFFILIATE_REVENUE_CSV_PATH: data/affiliate_revenue.csv

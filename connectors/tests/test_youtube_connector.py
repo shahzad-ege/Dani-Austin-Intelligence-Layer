@@ -6,6 +6,7 @@ schema (one of Google's oldest public APIs).
 
 import os
 import sys
+import requests
 from datetime import date
 from unittest.mock import patch, MagicMock
 
@@ -117,3 +118,80 @@ if __name__ == "__main__":
     test_fetch_video_analytics_uses_oauth_not_api_key()
     test_analytics_isolates_one_failing_video_from_the_batch()
     print("All YouTube connector tests passed.")
+
+
+# ---------- Real gaps found in a deeper review, no live credentials required ----------
+
+def test_playlist_items_failure_returns_empty_not_crash():
+    """REAL gap found in review: fetch_video_stats() had zero error
+    handling, unlike fetch_video_analytics() which isolates per-video
+    failures. A single quota/rate-limit/network error would crash the
+    whole function."""
+    def fake_get(url, params=None):
+        if "channels" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UU_test"}}}]
+            }, raise_for_status=lambda: None)
+        elif "playlistItems" in url:
+            raise requests.ConnectionError("simulated network failure")
+
+    with patch("requests.get", side_effect=fake_get):
+        result = yt.fetch_video_stats()
+    assert result == []
+
+
+def test_videos_batch_failure_isolated_not_crash():
+    def fake_get(url, params=None):
+        if "channels" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UU_test"}}}]
+            }, raise_for_status=lambda: None)
+        elif "playlistItems" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"contentDetails": {"videoId": "vid1"}}]
+            }, raise_for_status=lambda: None)
+        elif "videos" in url:
+            raise requests.HTTPError("simulated 403 quota exceeded")
+
+    with patch("requests.get", side_effect=fake_get):
+        result = yt.fetch_video_stats()
+    assert result == []
+
+
+def test_revoked_oauth_token_raises_clear_actionable_error():
+    """REAL gap found in review: a revoked refresh token (a real,
+    plausible failure -- password changes, security reviews) raised a
+    raw, unhelpful HTTP error with no indication of what to do."""
+    def fake_post(url, data=None):
+        return MagicMock(status_code=400, text='{"error": "invalid_grant"}')
+
+    with patch("requests.post", side_effect=fake_post):
+        try:
+            yt._get_oauth_access_token()
+            assert False, "should have raised"
+        except RuntimeError as e:
+            assert "revoked" in str(e).lower() or "channel owner" in str(e).lower()
+
+
+def test_malformed_published_date_uses_sentinel_not_crash():
+    """REAL gap found in review: the date-parsing fallback had no
+    fallback of its own -- a genuinely malformed date string would
+    still crash the whole batch."""
+    def fake_get(url, params=None):
+        if "channels" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UU_test"}}}]
+            }, raise_for_status=lambda: None)
+        elif "playlistItems" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"contentDetails": {"videoId": "vid1"}}]
+            }, raise_for_status=lambda: None)
+        elif "videos" in url:
+            return MagicMock(status_code=200, json=lambda: {
+                "items": [{"id": "vid1", "snippet": {"title": "Test", "publishedAt": "not-a-real-date"}, "statistics": {"viewCount": "100"}}]
+            }, raise_for_status=lambda: None)
+
+    with patch("requests.get", side_effect=fake_get):
+        result = yt.fetch_video_stats()
+    assert len(result) == 1
+    assert result[0].published_at == date(1970, 1, 1)

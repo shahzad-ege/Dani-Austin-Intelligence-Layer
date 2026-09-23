@@ -289,3 +289,43 @@ def test_default_limit_is_1000_matching_weekly_budget():
     import inspect
     sig = inspect.signature(xp.fetch_all_mentions)
     assert sig.parameters["limit_per_platform"].default == 1000
+
+
+def test_force_latest_applied_to_all_platforms():
+    """REAL finding: two real weeks showed Reddit returning 0
+    genuinely-new results out of 100 touched. Confirmed via the real
+    installed SDK that force_latest is a real parameter on all four
+    platforms -- applying it as the fix for stale, same-top-100
+    results."""
+    for platform in xp.TRACKED_PLATFORMS:
+        mock_client = MagicMock()
+        page = MagicMock()
+        page.data = []
+        page.has_next_page.return_value = False
+        getattr(mock_client, platform).search_posts.return_value = page
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        with patch("xpoz_connector.XpozClient", return_value=mock_client):
+            xp.search_mentions("test", platform)
+
+        kwargs = getattr(mock_client, platform).search_posts.call_args.kwargs
+        assert kwargs.get("force_latest") is True
+
+
+def test_sort_new_applied_only_to_reddit():
+    mock_client = MagicMock()
+    page = MagicMock()
+    page.data = []
+    page.has_next_page.return_value = False
+    mock_client.reddit.search_posts.return_value = page
+    mock_client.twitter.search_posts.return_value = page
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+
+    with patch("xpoz_connector.XpozClient", return_value=mock_client):
+        xp.search_mentions("test", "reddit")
+        xp.search_mentions("test", "twitter")
+
+    assert mock_client.reddit.search_posts.call_args.kwargs.get("sort") == "new"
+    assert "sort" not in mock_client.twitter.search_posts.call_args.kwargs

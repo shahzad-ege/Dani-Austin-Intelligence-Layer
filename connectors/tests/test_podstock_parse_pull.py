@@ -216,3 +216,57 @@ def test_catalog_split_number_parsing_does_not_swallow_trailing_comma():
     back_delivery = [m for m in metrics if m["metric"] == "back_catalog_delivery"]
     assert len(back_delivery) == 1
     assert back_delivery[0]["value"] == 67996.0  # not corrupted by a trailing comma
+
+
+# ---------- Windows/Notepad text corruption, found after a real save-and-run ----------
+
+def test_crlf_line_endings_do_not_break_parsing():
+    """REAL bug: a manually saved Notepad file (Windows default is CRLF)
+    correctly parsed metrics/demographics but silently dropped ALL
+    bookings and the top-episode line, while the exact same text pasted
+    directly worked fine. CRLF was the leading suspect since bookings
+    rely on end-of-line anchors that simpler \\s*-based metric patterns
+    don't."""
+    text = """SCHEDULE (2026-09-08 to 2026-10-08)\r
+\r
+Episode: September 10, 2026\r
+Quince — Host Read (Mid-Roll #1) — Booked\r
+\r
+AUDIENCE\r
+"""
+    metrics, demographics, bookings, top_episode, skipped = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    assert len(bookings) == 1
+    assert bookings[0]["brand"] == "Quince"
+
+
+def test_smart_quotes_around_episode_title_do_not_break_parsing():
+    """REAL bug, same investigation: Notepad/Windows commonly
+    autocorrects straight quotes to curly ones. The top-episode regex
+    requires a literal straight quote around the title."""
+    text = 'EPISODES\nTop recent episode: \u201cWhy Moving to Nashville Changed Everything\u201d — 71,291 total delivery\n'
+    metrics, demographics, bookings, top_episode, skipped = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    assert len(top_episode) == 1
+    assert top_episode[0]["episode_title"] == "Why Moving to Nashville Changed Everything"
+
+
+def test_both_corruptions_together_still_parse_correctly():
+    text = 'EPISODES\r\nTop recent episode: \u201cWhy Moving to Nashville Changed Everything\u201d — 71,291 total delivery\r\n'
+    metrics, demographics, bookings, top_episode, skipped = podstock_parse_pull.parse_pull(text, period_date=date(2026, 9, 8))
+    assert len(top_episode) == 1
+    assert top_episode[0]["episode_title"] == "Why Moving to Nashville Changed Everything"
+
+
+def test_run_reads_file_as_utf8_explicitly():
+    """REAL bug, confirmed definitively via direct codepoint diagnosis on
+    Shahzad's actual Windows machine: run()'s open(filepath) had no
+    explicit encoding, defaulting to the OS locale encoding. Linux
+    (this test environment) defaults to UTF-8, so this was invisible
+    here -- but Windows commonly defaults to cp1252, which misreads a
+    UTF-8 em-dash's bytes (E2 80 94) as garbage ('â€”'), silently
+    breaking every dash-dependent match while pure-ASCII fields parsed
+    fine. Reproduced exactly: reading the same UTF-8 file as cp1252
+    turns a real em-dash match into None. This test guards the fix by
+    asserting the actual open() call specifies UTF-8."""
+    import inspect
+    source = inspect.getsource(podstock_parse_pull.run)
+    assert 'encoding="utf-8"' in source or "encoding='utf-8'" in source

@@ -311,12 +311,277 @@ def extract_income_lines(txn: dict, txn_type: str) -> list[QBTransactionLine]:
     return records
 
 
+def extract_credit_memo_lines(txn: dict, txn_type: str) -> list[QBTransactionLine]:
+    """
+    Extracts real CreditMemo lines -- confirmed via live diagnostic
+    (Sep 2026) to be a small but real, currently-missing dataset: 6
+    records, 2018-2026, $115,929.31 total.
+
+    REAL, IMPORTANT CORRECTION to the original hypothesis: CreditMemo
+    was expected to mean "revenue overstated" (credits issued against
+    booked invoices). The real data shows something different: 99% of
+    the real total ($114,729.31) is Bad Debt write-offs -- a customer
+    (confirmed real example: CEG/Fit Track) never paid an already-
+    booked invoice, and it was written off as uncollectible, mapped to
+    a genuine EXPENSE account ("Other General & Administrative
+    Expenses:Bad Debt Expense"). Only the remaining $1,200.00 (Brand
+    Partnership) is a genuine revenue-reduction credit, matching the
+    original hypothesis. Missing this data means expenses are
+    UNDERSTATED, not that revenue is overstated -- the opposite of
+    what was assumed before seeing the real breakdown.
+
+    REAL STRUCTURE: unlike Purchase/Bill/Invoice/Deposit, which expose
+    account info directly via AccountRef, CreditMemo lines use
+    SalesItemLineDetail with an ItemRef (a product/service name, e.g.
+    "Bad Debts") AND a separate ItemAccountRef pointing to the real
+    underlying chart-of-accounts entry (e.g. "Other General &
+    Administrative Expenses:Bad Debt Expense"). ItemAccountRef.name is
+    used as the real "account" field here -- matching how every other
+    entity type in this connector reports account -- not ItemRef.name,
+    which is closer to a product/service label than a real account.
+
+    CATEGORY DETERMINATION: no PostingType/Debit-Credit concept exists
+    for CreditMemo the way it does for JournalEntry. Uses a real,
+    generalizable heuristic confirmed from this company's own existing
+    chart of accounts naming: an account name containing "Expense"
+    (matching real, already-established accounts like "Bad Debt
+    Expense", "Payroll Tax Expense", "Health Benefits Expense")
+    is treated as category='expense'; otherwise 'income', matching
+    SalesItemLineDetail's natural default for other entity types.
+
+    SIGN: a credit memo line always REDUCES whatever it's netted
+    against -- a real bad debt write-off increases expense (so, stored
+    negative, matching this connector's expense convention), a real
+    revenue credit decreases income (also stored negative, since it's
+    reducing previously-recognized income). Both cases are negative
+    here, unlike JournalEntry where sign depended on Debit vs Credit --
+    CreditMemo's Amount field is always the credit's magnitude, and the
+    real-world effect is always a reduction.
+    """
+    records = []
+    txn_id = txn.get("Id")
+    txn_date_str = txn.get("TxnDate")
+    if not txn_id or not txn_date_str:
+        return records
+
+    for line in txn.get("Line", []):
+        detail = line.get("SalesItemLineDetail")
+        if not detail:
+            continue  # skips SubTotalLineDetail and other non-item lines
+
+        account_name = (detail.get("ItemAccountRef") or {}).get("name")
+        amount = line.get("Amount")
+        if not account_name or amount is None:
+            continue
+
+        category = "expense" if "expense" in account_name.lower() else "income"
+
+        records.append(
+            QBTransactionLine(
+                qb_txn_id=str(txn_id),
+                qb_line_id=str(line.get("Id")) if line.get("Id") is not None else None,
+                qb_txn_type=txn_type,
+                txn_date=date.fromisoformat(txn_date_str),
+                category=category,
+                account=account_name,
+                source=extract_business_unit(txn, line, detail, account_name),
+                amount=-abs(float(amount)),  # always a reduction, regardless of category
+                memo=line.get("Description") or txn.get("PrivateNote"),
+            )
+        )
+    return records
+
+
+def extract_platform_affiliate_journal_lines(txn: dict, txn_type: str) -> list[QBTransactionLine]:
+    """
+    Extracts real LTK/Platform Affiliate revenue from JournalEntry
+    records -- the same real blind spot that hid payroll, now confirmed
+    to also hide LTK commission revenue.
+
+    REAL, CONFIRMED FINDING (Sep 2026): a P&L reconciliation found
+    "Platform Affiliate:Platform Affiliate - LTK" had zero transactions
+    for all of 2023-2026, despite the account being correctly classified.
+    Root cause confirmed via a live diagnostic: starting sometime in
+    2023, LTK/RewardStyle revenue moved from simple Deposit transactions
+    to being recorded via JournalEntry -- matching Katelyn's own
+    description of recording it via "adjusting entries" after her real,
+    confirmed process (estimate monthly, true up ~90 days later against
+    LTK's real analytics, net of an ~20-23% return rate).
+
+    Confirmed real entry structure: EntityRef.name = "RewardStyle" (the
+    real customer/vendor name Katelyn described -- this is why an
+    earlier search of the ACCOUNT field for "RewardStyle" found nothing;
+    it's the entity name, not the account name). Each entry debits/
+    credits both an Accounts Receivable (A/R) line and the real LTK
+    revenue account -- e.g. gross earnings (Credit to LTK, Debit to
+    A/R), plus a separate returns adjustment (Debit to LTK, Credit to
+    A/R) that reduces the recognized revenue.
+
+    DELIBERATELY SCOPED to "Platform Affiliate:Platform Affiliate - LTK"
+    specifically, NOT a general Platform Affiliate extractor -- same
+    safety reasoning as the payroll extractor: confirming whether
+    Amazon/Facebook/Other Platform Affiliate accounts use this same
+    JournalEntry mechanism needs its own real diagnostic check, not an
+    assumption that they behave identically just because the account
+    family name is similar.
+
+    SIGN CONVENTION -- the OPPOSITE of payroll's, since this is revenue
+    not expense: Credit increases real income (stored positive, matching
+    this connector's existing income convention), Debit decreases it
+    (stored negative -- e.g. the real returns adjustment). Verified
+    against a real entry: gross $12,498.54 (Credit) minus a $2,499.71
+    returns adjustment (Debit) nets to $9,998.83 for August 2026 --
+    consistent with Katelyn's stated ~20-23% real return rate.
+
+    Real, confirmed oddity in the live data, harmless: a $0.00 "LTK
+    Bonus - Estimate" pair sometimes shows BOTH lines as Debit (not a
+    balanced Debit/Credit pair) -- since the amount is genuinely zero,
+    this doesn't affect any real total, but is worth knowing this
+    exists in case a future entry ever has a non-zero bonus with the
+    same odd structure.
+    """
+    records = []
+    txn_id = txn.get("Id")
+    txn_date_str = txn.get("TxnDate")
+    if not txn_id or not txn_date_str:
+        return records
+
+    TARGET_ACCOUNT = "Platform Affiliate:Platform Affiliate - LTK"
+
+    for line in txn.get("Line", []):
+        detail = line.get("JournalEntryLineDetail")
+        if not detail:
+            continue
+
+        account_name = (detail.get("AccountRef") or {}).get("name")
+        posting_type = detail.get("PostingType")
+        amount = line.get("Amount")
+        if account_name != TARGET_ACCOUNT or posting_type not in ("Debit", "Credit") or amount is None:
+            continue
+
+        signed_amount = abs(float(amount)) if posting_type == "Credit" else -abs(float(amount))
+
+        records.append(
+            QBTransactionLine(
+                qb_txn_id=str(txn_id),
+                qb_line_id=str(line.get("Id")) if line.get("Id") is not None else None,
+                qb_txn_type=txn_type,
+                txn_date=date.fromisoformat(txn_date_str),
+                category="income",
+                account=account_name,
+                source="Affiliate",
+                amount=signed_amount,
+                memo=line.get("Description"),
+            )
+        )
+    return records
+
+
+def extract_journal_entry_lines(txn: dict, txn_type: str) -> list[QBTransactionLine]:
+    """
+    Extracts real payroll expense lines from JournalEntry records.
+
+    REAL, CONFIRMED FINDING (Sep 2026): reconciling against a real
+    QuickBooks P&L export found that Salaries & Wages -- the single
+    largest expense line in the entire business ($360,464.13/year) --
+    was completely missing from this connector, because it's posted by
+    Gusto (confirmed via DocNumber: "Gusto" on real entries) as a
+    JournalEntry, an entity type this connector never queried.
+
+    DELIBERATELY SCOPED to accounts under the "Payroll:" prefix only,
+    NOT a general JournalEntry extractor. Two real reasons, confirmed
+    from live diagnostic data, not theoretical:
+      1. A real non-payroll example (a $250 contractor journal entry)
+         had a LinkedTxn pointing to a BillPayment -- meaning some
+         journal entries are just the accounting mechanics of recording
+         a payment against a Bill ALREADY captured elsewhere. Extracting
+         those generically risks double-counting a real expense.
+      2. Confirmed real payroll entries have BOTH a bank/cash line (e.g.
+         "Business Checking 8207", the net-pay cash outflow) and the
+         real expense lines, all in the same entry. Reliably telling
+         "genuine P&L account" from "balance sheet account" for
+         arbitrary journal entries would need real AccountType data
+         from QuickBooks' Account entity, which isn't fetched today --
+         the "Payroll:" prefix is a confirmed, reliable signal for the
+         one case this connector is built to solve.
+
+    SIGN CONVENTION, confirmed against a real entry: a real Gusto
+    payroll run debits genuine expense accounts (Salaries & Wages,
+    Payroll Tax Expense, employer-paid Retirement/Health Benefits) and
+    separately CREDITS some of those same accounts for the
+    employee-withheld portion (e.g. the employee's own 401k
+    contribution, or their share of a health premium). Debit increases
+    the expense (stored negative, matching this connector's existing
+    convention); Credit offsets it (stored positive). Verified against
+    a real entry that this produces sensible net figures for Salaries &
+    Wages, Payroll Tax, and employer-paid Retirement/Health lines.
+
+    ONE REAL, UNRESOLVED EDGE CASE, flagged rather than silently
+    assumed: "Retirement Plan Contributions - Employee" only ever
+    appeared as a Credit in the one real entry checked, meaning it nets
+    POSITIVE here -- but this account genuinely represents an
+    employee-withholding pass-through (a liability), not a real company
+    expense, so its correct sign/treatment in a true P&L view is a real
+    accounting question worth confirming with Katelyn directly, not
+    something resolved here just because the code produces *a* number.
+    """
+    records = []
+    txn_id = txn.get("Id")
+    txn_date_str = txn.get("TxnDate")
+    if not txn_id or not txn_date_str:
+        return records
+
+    for line in txn.get("Line", []):
+        detail = line.get("JournalEntryLineDetail")
+        if not detail:
+            continue
+
+        account_name = (detail.get("AccountRef") or {}).get("name")
+        posting_type = detail.get("PostingType")
+        amount = line.get("Amount")
+        if not account_name or not account_name.startswith("Payroll:") or posting_type not in ("Debit", "Credit") or amount is None:
+            continue
+
+        signed_amount = -abs(float(amount)) if posting_type == "Debit" else abs(float(amount))
+
+        records.append(
+            QBTransactionLine(
+                qb_txn_id=str(txn_id),
+                qb_line_id=str(line.get("Id")) if line.get("Id") is not None else None,
+                qb_txn_type=txn_type,
+                txn_date=date.fromisoformat(txn_date_str),
+                category="expense",
+                account=account_name,
+                source=extract_business_unit(txn, line, detail, account_name),
+                amount=signed_amount,
+                memo=line.get("Description"),
+            )
+        )
+    return records
+
+
+def extract_journal_entry_lines_combined(txn: dict, txn_type: str) -> list[QBTransactionLine]:
+    """
+    Combines payroll and LTK/Platform Affiliate extraction from the
+    SAME JournalEntry fetch. Deliberately a single combined function,
+    not two separate ENTITY_CONFIG rows both mapped to "JournalEntry" --
+    that would fetch the same real journal entries twice from the QB
+    API, wastefully doubling a real API call for no benefit (each
+    extractor is already scoped to non-overlapping accounts, so there's
+    no correctness reason to fetch twice, only an efficiency one to
+    fetch once).
+    """
+    return extract_journal_entry_lines(txn, txn_type) + extract_platform_affiliate_journal_lines(txn, txn_type)
+
+
 ENTITY_CONFIG = [
     ("Purchase", extract_expense_lines),
     ("Bill", extract_expense_lines),
     ("Invoice", extract_income_lines),
     ("SalesReceipt", extract_income_lines),
     ("Deposit", extract_income_lines),
+    ("JournalEntry", extract_journal_entry_lines_combined),
+    ("CreditMemo", extract_credit_memo_lines),
 ]
 
 
@@ -387,6 +652,41 @@ def sync_ar_aging() -> int:
     return written
 
 
+def backfill_journal_entries(since: date = date(2018, 1, 1)) -> int:
+    """
+    Full historical backfill for JournalEntry specifically -- NOT the
+    other 5 entity types, which are already fully backfilled and
+    unchanged. Reuses the exact same qb_query()/extract_journal_entry_lines()
+    logic run() uses, just scoped to one entity so this doesn't
+    needlessly re-pull years of already-correct Purchase/Bill/Invoice/
+    SalesReceipt/Deposit data.
+
+    Defaults to 2018-01-01, matching this company's confirmed real data
+    start (per the existing full-history backfill already done for the
+    other 5 entities) rather than an arbitrary earlier date.
+    """
+    access_token = refresh_access_token()
+    query = f"SELECT * FROM JournalEntry WHERE TxnDate >= '{since.isoformat()}'"
+    print(f"[qb] JournalEntry backfill: querying from {since.isoformat()} onward...")
+
+    txns = qb_query(access_token, query)
+    print(f"[qb] JournalEntry backfill: {len(txns)} real journal entries returned.")
+
+    all_records: list[QBTransactionLine] = []
+    for txn in txns:
+        all_records.extend(extract_journal_entry_lines_combined(txn, "JournalEntry"))
+
+    print(f"[qb] JournalEntry backfill: {len(all_records)} real line(s) extracted "
+          f"(payroll + LTK/Platform Affiliate; other journal entries correctly skipped).")
+
+    if not all_records:
+        return 0
+
+    written = upsert_rows("qb_da_transaction_lines", [r.to_row() for r in all_records])
+    print(f"[qb] JournalEntry backfill: wrote {written} row(s) to Supabase.")
+    return written
+
+
 def run(since: date | None = None) -> int:
     since = since or (date.today() - timedelta(days=90))
     access_token = refresh_access_token()
@@ -421,9 +721,16 @@ if __name__ == "__main__":
                              "their Balance and DueDate, for the AR position/aging "
                              "views. A separate mode from the regular sync since it's a "
                              "different query and a different table.")
+    parser.add_argument("--journal-entry-backfill", action="store_true",
+                        help="Full historical backfill for JournalEntry ONLY (payroll data), "
+                             "not the other 5 entity types which are already backfilled. "
+                             "Avoids needlessly re-pulling years of unchanged data.")
     args = parser.parse_args()
 
-    if args.ar_aging:
+    if args.journal_entry_backfill:
+        count = backfill_journal_entries()
+        print(f"QuickBooks JournalEntry backfill: upserted {count} transaction lines.")
+    elif args.ar_aging:
         count = sync_ar_aging()
         print(f"QuickBooks AR aging sync: upserted {count} invoice(s).")
     else:

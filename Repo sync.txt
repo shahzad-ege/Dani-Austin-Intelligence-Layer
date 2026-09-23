@@ -1,0 +1,12 @@
+# 2. See exactly what changed before touching git
+git status
+
+# 3. Run tests one more time
+cd connectors
+python -m pytest tests/
+cd ..
+
+# 4. Stage, commit, push
+git add .
+git commit -m "Fixes"
+git push
