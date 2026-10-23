@@ -161,6 +161,7 @@ def test_refresh_access_token_persists_rotated_token_immediately():
     QuickBooks issues on every use must be saved right away, or the next
     scheduled run fails with an invalidated token."""
     with patch("qb_connector.load_stored_refresh_token", return_value="old_token"), \
+         patch("qb_connector._vault_set_refresh_token", return_value=False), \
          patch("qb_connector.requests.post") as mock_post, \
          patch("qb_connector.upsert_rows") as mock_upsert:
 
@@ -186,7 +187,8 @@ def test_load_stored_refresh_token_bootstraps_from_env_when_table_empty():
     fake_client = MagicMock()
     fake_client.table.return_value.select.return_value.eq.return_value.execute.return_value.data = []
 
-    with patch("qb_connector.get_client", return_value=fake_client):
+    with patch("qb_connector.get_client", return_value=fake_client), \
+         patch("qb_connector._vault_get_refresh_token", return_value=None):
         token = qb_connector.load_stored_refresh_token()
 
     assert token == "test_bootstrap_token"  # from the env var set at top of this file
@@ -200,10 +202,35 @@ def test_load_stored_refresh_token_prefers_stored_token_over_env():
         {"refresh_token": "rotated_token_from_supabase"}
     ]
 
-    with patch("qb_connector.get_client", return_value=fake_client):
+    with patch("qb_connector.get_client", return_value=fake_client), \
+         patch("qb_connector._vault_get_refresh_token", return_value=None):
         token = qb_connector.load_stored_refresh_token()
 
     assert token == "rotated_token_from_supabase"
+
+
+def test_vault_token_preferred_over_table_and_env():
+    """Bug list Oct 21 2026 #13: Vault is the source of truth once migration 036 runs."""
+    with patch("qb_connector._vault_get_refresh_token", return_value="vault_token"), \
+         patch("qb_connector.get_client") as gc:
+        assert qb_connector.load_stored_refresh_token() == "vault_token"
+        gc.return_value.table.assert_not_called()
+
+
+def test_rotated_token_saved_to_vault_not_table_when_available():
+    with patch("qb_connector._vault_set_refresh_token", return_value=True) as vset, \
+         patch("qb_connector.upsert_rows") as mock_upsert:
+        qb_connector.save_refreshed_token("new_tok")
+    vset.assert_called_once_with("new_tok")
+    mock_upsert.assert_not_called()
+
+
+def test_vault_read_failure_falls_back_cleanly():
+    fake_client = MagicMock()
+    fake_client.rpc.side_effect = Exception("function does not exist")
+    with patch("qb_connector.get_client", return_value=fake_client):
+        assert qb_connector._vault_get_refresh_token() is None
+        assert qb_connector._vault_set_refresh_token("x") is False
 
 
 def test_run_queries_all_five_entity_types_and_writes_combined_result():

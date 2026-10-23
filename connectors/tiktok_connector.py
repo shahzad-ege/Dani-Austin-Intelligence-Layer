@@ -193,45 +193,65 @@ def fetch_profile_metrics(access_token: str) -> list[SocialMetric]:
     return records
 
 
+def _lifetime_totals_from_video_table() -> dict[str, float] | None:
+    """
+    Account-level engagement = SUM of the latest known lifetime counts
+    across every video in tiktok_video_metrics (1,700+ videos, kept fresh
+    for recent posts by sync_recent_video_metrics()).
+
+    WHY (bug list Oct 21 2026, #3): the old fetch_video_metrics() called
+    /business/video/list/ without max_count/item_id and TikTok returned
+    ZERO videos on every run since 9/23 (confirmed by the diagnostic line
+    it printed: "returned 0 real video(s) ... 0/OK"), so views/likes/
+    comments/shares were written as 0 for 29 straight days. The paged call
+    in sync_recent_video_metrics() uses the same endpoint correctly, so we
+    reuse its output rather than a second, broken call.
+
+    Returns None (and the caller writes NOTHING) when no rows exist --
+    never a fake 0.
+    """
+    from db import get_client
+
+    client = get_client()
+    totals = {"views": 0.0, "likes": 0.0, "comments": 0.0, "shares": 0.0}
+    seen = 0
+    page, size = 0, 1000  # PostgREST caps a select at 1000 rows by default
+    while True:
+        resp = (
+            client.table("tiktok_video_metrics")
+            .select("video_views,likes,comments,shares")
+            .range(page * size, page * size + size - 1)
+            .execute()
+        )
+        rows = resp.data or []
+        for r in rows:
+            totals["views"] += float(r.get("video_views") or 0)
+            totals["likes"] += float(r.get("likes") or 0)
+            totals["comments"] += float(r.get("comments") or 0)
+            totals["shares"] += float(r.get("shares") or 0)
+        seen += len(rows)
+        if len(rows) < size:
+            break
+        page += 1
+    return totals if seen else None
+
+
 def fetch_video_metrics(access_token: str) -> list[SocialMetric]:
     """
-    Aggregates video-level metrics (views, likes, comments, shares) into a
-    single daily total. NOTE: enrichment fields go null after ~7 days of no
-    engagement on a post, and data stops updating 365 days post-publish —
-    expect some undercounting on older content.
+    Account-level lifetime engagement totals (views, likes, comments,
+    shares) as of today. See _lifetime_totals_from_video_table() for why
+    this no longer calls the API directly. Any metric that can't be
+    computed is OMITTED rather than written as 0.
     """
     today = date.today()
-    resp = requests.get(
-        f"{TIKTOK_BASE_URL}/business/video/list/",
-        headers={"Access-Token": access_token},
-        params={
-            "business_id": TIKTOK_BUSINESS_ID,
-            "fields": '["video_views","likes","comments","shares"]',
-        },
-    )
-    resp.raise_for_status()
-    raw = resp.json()
-    videos = raw.get("data", {}).get("videos", [])
-    # TEMPORARY real diagnostic (Sep 23 2026): fetch_video_metrics()
-    # summed to all-zero in production despite this exact response
-    # shape independently proven to work correctly when tested
-    # directly. Printing the real video count so the next live run
-    # shows exactly what TikTok actually returned at that moment,
-    # rather than guessing between a token-timing issue and something
-    # else -- remove once the real cause is confirmed.
-    print(f"[tiktok DIAGNOSTIC] /business/video/list/ returned {len(videos)} real video(s). "
-          f"Raw response code/message: {raw.get('code')}/{raw.get('message')}")
-
-    totals = {"views": 0.0, "likes": 0.0, "comments": 0.0, "shares": 0.0}
-    for video in videos:
-        totals["views"] += float(video.get("video_views") or 0)
-        totals["likes"] += float(video.get("likes") or 0)
-        totals["comments"] += float(video.get("comments") or 0)
-        totals["shares"] += float(video.get("shares") or 0)
-
+    totals = _lifetime_totals_from_video_table()
+    if not totals:
+        print("[tiktok] No per-video rows available -- skipping account-level engagement (not writing zeros).")
+        return []
     return [
         SocialMetric(TIKTOK_BUSINESS_ID, metric, today, value)
         for metric, value in totals.items()
+        if value > 0
     ]
 
 
@@ -419,10 +439,12 @@ def sync_recent_video_metrics(access_token: str) -> int:
 def run() -> int:
     seed_account()
     access_token = refresh_access_token()
+    # Per-video refresh FIRST, so the account-level totals computed from
+    # tiktok_video_metrics include today's numbers for recent posts.
+    video_count = sync_recent_video_metrics(access_token)
+    print(f"[tiktok] Refreshed {video_count} recent per-video row(s).")
     records = fetch_profile_metrics(access_token) + fetch_video_metrics(access_token)
     count = upsert_rows("social_metrics", [r.to_row() for r in records])
-    video_count = sync_recent_video_metrics(access_token)
-    print(f"[tiktok] Also refreshed {video_count} recent per-video row(s).")
     return count
 
 

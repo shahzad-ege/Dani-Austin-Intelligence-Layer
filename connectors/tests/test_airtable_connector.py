@@ -276,3 +276,37 @@ def test_real_custom_table_name_still_respected():
         assert airtable_connector.AIRTABLE_TABLE_NAME == "SomeOtherTable"
     finally:
         importlib.reload(airtable_connector)
+
+
+# --- Bug list Oct 21 2026 #7 ---------------------------------------------
+
+def test_multiselect_status_stored_as_plain_text_not_json():
+    assert airtable_connector._normalise_status(["Payment Received"]) == "Payment Received"
+    assert airtable_connector._normalise_status(["Scheduled", "Production "]) == "Scheduled, Production"
+    assert airtable_connector._normalise_status(None) == "Unknown"
+    assert airtable_connector._normalise_status([]) == "Unknown"
+    assert airtable_connector._normalise_status("Invoiced") == "Invoiced"
+
+
+def test_bare_month_inferred_from_created_time_in_separate_column():
+    infer = airtable_connector._infer_bare_month
+    assert infer("June", "2025-05-20T10:00:00.000Z") == date(2025, 6, 1)
+    assert infer("February ", "2025-12-03T10:00:00.000Z") == date(2026, 2, 1)   # next year is closer
+    assert infer("November", "2026-01-15T10:00:00.000Z") == date(2025, 11, 1)  # previous year is closer
+    assert infer("January 20", "2025-01-15T10:00:00.000Z") is None             # typo stays None
+    assert infer("June", None) is None
+    # the canonical parser is unchanged -- still never guesses
+    assert airtable_connector._parse_month("June") is None
+
+
+def test_row_carries_raw_and_inferred_months():
+    from models import AirtablePartnership
+    row = AirtablePartnership(
+        deal_id="rec1", invoice_no=None, status="Invoiced", deliverable_platform=None,
+        client=None, is_repeat=None, gross_amt=1.0, net_amt=1.0,
+        month_committed=None, month_completed=None,
+        month_committed_raw="June ", month_committed_inferred=date(2025, 6, 1),
+    ).to_row()
+    assert row["month_committed"] is None
+    assert row["month_committed_raw"] == "June"
+    assert row["month_committed_inferred"] == "2025-06-01"

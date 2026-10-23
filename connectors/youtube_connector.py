@@ -129,6 +129,11 @@ class YouTubeVideoAnalytics:
     average_view_percentage: float
     subscribers_gained: int
     subscribers_lost: int
+    # 'day' = that single calendar day (daily run, dimensions=day);
+    # 'lifetime' = publish date -> period_date (backfill_youtube.py);
+    # 'trailing_7d' = legacy rows written 9/24-9/30 2026 only.
+    # NEVER sum across period types.
+    period_type: str = "day"
 
     def to_row(self) -> dict:
         return {
@@ -143,6 +148,7 @@ class YouTubeVideoAnalytics:
             "average_view_percentage": self.average_view_percentage,
             "subscribers_gained": self.subscribers_gained,
             "subscribers_lost": self.subscribers_lost,
+            "period_type": self.period_type,
             "business_unit": "Podcast",
         }
 
@@ -154,6 +160,7 @@ class YouTubeTrafficSource:
     traffic_source_type: str
     views: int
     estimated_minutes_watched: float
+    period_type: str = "day"  # same meaning as YouTubeVideoAnalytics.period_type
 
     def to_row(self) -> dict:
         return {
@@ -162,6 +169,7 @@ class YouTubeTrafficSource:
             "traffic_source_type": self.traffic_source_type,
             "views": self.views,
             "estimated_minutes_watched": self.estimated_minutes_watched,
+            "period_type": self.period_type,
             "business_unit": "Podcast",
         }
 
@@ -354,7 +362,7 @@ def _get_oauth_access_token() -> str:
     return resp.json()["access_token"]
 
 
-def fetch_video_analytics(video_ids: list[str], start_date: date, end_date: date) -> list[YouTubeVideoAnalytics]:
+def fetch_video_analytics(video_ids: list[str], start_date: date, end_date: date, daily: bool = True) -> list[YouTubeVideoAnalytics]:
     """Analytics API -- retention, watch time, subscriber attribution.
     Requires OAuth (see module docstring) -- an API key alone cannot
     access this, since it's private, owner-only data.
@@ -363,7 +371,14 @@ def fetch_video_analytics(video_ids: list[str], start_date: date, end_date: date
     confirmed core video-report metric set: views, estimatedMinutesWatched,
     likes, comments, shares, subscribersGained, subscribersLost, plus the
     original averageViewDuration/averageViewPercentage -- confirmed real
-    field names from Google's own Analytics API metrics documentation."""
+    field names from Google's own Analytics API metrics documentation.
+
+    daily=True (Oct 22 2026, bug list #4): adds dimensions=day so each
+    row is ONE real calendar day, stored with that day as period_date.
+    Before this, the daily run stored a 7-day window total under the run
+    date, so summing rows across days double-counted ~7x.
+    daily=False returns one aggregate row for the whole window, labelled
+    period_type='lifetime' (used only by backfill_youtube.py)."""
     access_token = _get_oauth_access_token()
     records = []
 
@@ -380,6 +395,7 @@ def fetch_video_analytics(video_ids: list[str], start_date: date, end_date: date
                 "endDate": end_date.isoformat(),
                 "metrics": METRICS,
                 "filters": f"video=={video_id}",
+                **({"dimensions": "day", "sort": "day"} if daily else {}),
             },
         )
         if resp.status_code >= 400:
@@ -391,27 +407,34 @@ def fetch_video_analytics(video_ids: list[str], start_date: date, end_date: date
         if not rows:
             continue
 
-        views, est_minutes, likes, comments, shares, avg_duration, avg_pct, subs_gained, subs_lost = rows[0]
-        records.append(
-            YouTubeVideoAnalytics(
-                video_id=video_id,
-                period_date=end_date,
-                views=int(views),
-                estimated_minutes_watched=float(est_minutes),
-                likes=int(likes),
-                comments=int(comments),
-                shares=int(shares),
-                average_view_duration_seconds=float(avg_duration),
-                average_view_percentage=float(avg_pct),
-                subscribers_gained=int(subs_gained),
-                subscribers_lost=int(subs_lost),
+        for row in (rows if daily else rows[:1]):
+            if daily:
+                day_str, *row = row
+                period = date.fromisoformat(day_str)
+            else:
+                period = end_date
+            views, est_minutes, likes, comments, shares, avg_duration, avg_pct, subs_gained, subs_lost = row
+            records.append(
+                YouTubeVideoAnalytics(
+                    video_id=video_id,
+                    period_date=period,
+                    period_type="day" if daily else "lifetime",
+                    views=int(views),
+                    estimated_minutes_watched=float(est_minutes),
+                    likes=int(likes),
+                    comments=int(comments),
+                    shares=int(shares),
+                    average_view_duration_seconds=float(avg_duration),
+                    average_view_percentage=float(avg_pct),
+                    subscribers_gained=int(subs_gained),
+                    subscribers_lost=int(subs_lost),
+                )
             )
-        )
 
     return records
 
 
-def fetch_traffic_sources(video_ids: list[str], start_date: date, end_date: date) -> list[YouTubeTrafficSource]:
+def fetch_traffic_sources(video_ids: list[str], start_date: date, end_date: date, daily: bool = True) -> list[YouTubeTrafficSource]:
     """Real, confirmed traffic source breakdown -- the actual original
     motivation for building OAuth in the first place, per this module's
     own docstring ('retention curves, traffic sources'). Confirmed real
@@ -433,9 +456,9 @@ def fetch_traffic_sources(video_ids: list[str], start_date: date, end_date: date
                 "startDate": start_date.isoformat(),
                 "endDate": end_date.isoformat(),
                 "metrics": "views,estimatedMinutesWatched",
-                "dimensions": "insightTrafficSourceType",
+                "dimensions": "day,insightTrafficSourceType" if daily else "insightTrafficSourceType",
                 "filters": f"video=={video_id}",
-                "sort": "-views",
+                "sort": "day" if daily else "-views",
             },
         )
         if resp.status_code >= 400:
@@ -443,11 +466,17 @@ def fetch_traffic_sources(video_ids: list[str], start_date: date, end_date: date
             continue
 
         for row in resp.json().get("rows", []):
-            source_type, views, est_minutes = row
+            if daily:
+                day_str, source_type, views, est_minutes = row
+                period = date.fromisoformat(day_str)
+            else:
+                source_type, views, est_minutes = row
+                period = end_date
             records.append(
                 YouTubeTrafficSource(
                     video_id=video_id,
-                    period_date=end_date,
+                    period_date=period,
+                    period_type="day" if daily else "lifetime",
                     traffic_source_type=source_type,
                     views=int(views),
                     estimated_minutes_watched=float(est_minutes),
@@ -458,7 +487,7 @@ def fetch_traffic_sources(video_ids: list[str], start_date: date, end_date: date
 
 
 
-def run() -> int:
+def run(days: int = 7) -> int:
     """
     REAL, SIGNIFICANT GAP FOUND (Sep 23 2026): this connector had never
     actually been wired into a runnable entry point. Every function
@@ -495,18 +524,23 @@ def run() -> int:
         return stats_written
 
     video_ids = [r.video_id for r in stats_records]
-    end_date = date.today()
-    start_date = end_date - timedelta(days=7)
+    # Re-pull the last `days` complete days every run: YouTube Analytics
+    # lags 1-3 days and revises recent days, and re-upserting the same
+    # (video_id, period_date, period_type) keys is idempotent.
+    end_date = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=days - 1)
 
     try:
         analytics_records = fetch_video_analytics(video_ids, start_date, end_date)
     except RuntimeError as e:
-        # A revoked/expired refresh token is a real, actionable
-        # condition (per _get_oauth_access_token()'s own error
-        # message) -- surface it clearly but don't let it wipe out the
-        # real stats data already written above.
+        # Stats are already written above, so nothing is lost -- but this
+        # MUST fail the run loudly. Bug list Oct 21 2026 #4: the old code
+        # printed and returned success, so analytics silently stopped on
+        # 9/30 (the OAuth refresh token expired) and nobody was alerted
+        # for three weeks. Raising makes run_all.py exit 1 -> red GitHub
+        # Action -> failure email.
         print(f"[youtube] Analytics fetch failed, but stats were already written: {e}")
-        return stats_written
+        raise
 
     analytics_written = upsert_rows("youtube_video_analytics", [r.to_row() for r in analytics_records]) if analytics_records else 0
     print(f"[youtube] Video analytics: {analytics_written} row(s) written.")
@@ -520,11 +554,15 @@ def run() -> int:
         # revoked token here shouldn't wipe out real data already
         # written for stats and analytics.
         print(f"[youtube] Traffic source fetch failed, but stats/analytics were already written: {e}")
-        traffic_written = 0
+        raise
 
     return stats_written + analytics_written + traffic_written
 
 
 if __name__ == "__main__":
-    count = run()
+    import sys
+    # Catch-up backfill, e.g. after re-authorising OAuth:
+    #   python youtube_connector.py --days 30
+    days = int(sys.argv[sys.argv.index("--days") + 1]) if "--days" in sys.argv else 7
+    count = run(days=days)
     print(f"YouTube connector: upserted {count} total rows.")

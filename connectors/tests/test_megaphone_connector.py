@@ -120,3 +120,12 @@ def test_run_handles_empty_episodes_gracefully():
     with patch("megaphone_connector.fetch_episodes", return_value=[]):
         result = mc.run()
     assert result == 0
+
+
+def test_run_fails_loudly_on_http_error():
+    """Bug list Oct 21 2026 #2: run() used to log the 404 and report OK."""
+    import pytest
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=404, text="<html>404</html>")
+        with pytest.raises(RuntimeError):
+            mc.run()

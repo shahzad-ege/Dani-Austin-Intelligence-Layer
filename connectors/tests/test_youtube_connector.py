@@ -93,7 +93,7 @@ def test_fetch_video_analytics_uses_oauth_not_api_key():
         # Real order: views, estimatedMinutesWatched, likes, comments,
         # shares, averageViewDuration, averageViewPercentage,
         # subscribersGained, subscribersLost
-        return MagicMock(status_code=200, json=lambda: {"rows": [[5000, 1200.5, 300, 25, 10, 245.5, 62.3, 18, 2]]})
+        return MagicMock(status_code=200, json=lambda: {"rows": [["2026-08-30", 5000, 1200.5, 300, 25, 10, 245.5, 62.3, 18, 2]]})
 
     with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
         records = yt.fetch_video_analytics(["vid1"], date(2026, 8, 1), date(2026, 8, 31))
@@ -115,7 +115,7 @@ def test_analytics_isolates_one_failing_video_from_the_batch():
     def fake_get(url, headers=None, params=None):
         if params.get("filters") == "video==vid_bad":
             return MagicMock(status_code=403, text="quota exceeded")
-        return MagicMock(status_code=200, json=lambda: {"rows": [[100, 20.0, 5, 1, 0, 100.0, 50.0, 5, 0]]})
+        return MagicMock(status_code=200, json=lambda: {"rows": [["2026-08-30", 100, 20.0, 5, 1, 0, 100.0, 50.0, 5, 0]]})
 
     with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
         records = yt.fetch_video_analytics(["vid_bad", "vid_good"], date(2026, 8, 1), date(2026, 8, 31))
@@ -131,11 +131,11 @@ def test_fetch_traffic_sources_returns_per_source_breakdown():
         return MagicMock(status_code=200, json=lambda: {"access_token": "fake_token"}, raise_for_status=lambda: None)
 
     def fake_get(url, headers=None, params=None):
-        assert params["dimensions"] == "insightTrafficSourceType"
+        assert params["dimensions"] == "day,insightTrafficSourceType"
         return MagicMock(status_code=200, json=lambda: {"rows": [
-            ["YT_SEARCH", 3000, 800.0],
-            ["SUGGESTED_VIDEO", 1500, 400.0],
-            ["EXT_URL", 500, 120.0],
+            ["2026-08-30", "YT_SEARCH", 3000, 800.0],
+            ["2026-08-30", "SUGGESTED_VIDEO", 1500, 400.0],
+            ["2026-08-31", "EXT_URL", 500, 120.0],
         ]})
 
     with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
@@ -145,6 +145,7 @@ def test_fetch_traffic_sources_returns_per_source_breakdown():
     assert records[0].traffic_source_type == "YT_SEARCH"
     assert records[0].views == 3000
     assert records[1].traffic_source_type == "SUGGESTED_VIDEO"
+    assert records[2].period_date == date(2026, 8, 31)
 
 
 if __name__ == "__main__":
@@ -271,17 +272,44 @@ def test_run_skips_analytics_gracefully_when_no_stats_found():
 
 def test_run_preserves_written_stats_when_analytics_fails():
     """A revoked/expired OAuth refresh token must not wipe out the
-    real stats data (public, API-key-only) already successfully
-    written before the Analytics (OAuth-required) call was attempted."""
+    real stats data already written -- AND must fail the run loudly
+    (bug list Oct 21 2026 #4: it used to return success silently, so
+    analytics stopped on 9/30 without anyone being alerted)."""
+    import pytest
     fake_stats = [yt.YouTubeVideoStats("v1", "Test", date(2026, 9, 1), 100, 10, 1)]
 
     with patch.object(yt, "fetch_video_stats", return_value=fake_stats), \
          patch.object(yt, "fetch_video_analytics", side_effect=RuntimeError("token revoked")), \
          patch("writer.upsert_rows", return_value=1) as mock_upsert:
-        result = yt.run()
+        with pytest.raises(RuntimeError):
+            yt.run()
 
-    assert result == 1
-    assert mock_upsert.call_count == 1  # stats written; analytics never reached a write call
+    assert mock_upsert.call_count == 1  # stats written before the failure
+
+
+def test_daily_analytics_rows_are_dated_per_day_not_run_date():
+    """Bug list #4: each row must be one real calendar day."""
+    def fake_get(url, headers=None, params=None):
+        assert params["dimensions"] == "day"
+        return MagicMock(status_code=200, json=lambda: {"rows": [
+            ["2026-10-01", 10, 1.0, 1, 0, 0, 60.0, 40.0, 0, 0],
+            ["2026-10-02", 20, 2.0, 2, 0, 0, 60.0, 40.0, 1, 0],
+        ]})
+    with patch.object(yt, "_get_oauth_access_token", return_value="tok"), \
+         patch.object(yt.requests, "get", side_effect=fake_get):
+        recs = yt.fetch_video_analytics(["v1"], date(2026, 10, 1), date(2026, 10, 2))
+    assert [r.period_date for r in recs] == [date(2026, 10, 1), date(2026, 10, 2)]
+    assert all(r.to_row()["period_type"] == "day" for r in recs)
+
+
+def test_lifetime_mode_used_by_backfill_is_labelled_lifetime():
+    def fake_get(url, headers=None, params=None):
+        assert "dimensions" not in params
+        return MagicMock(status_code=200, json=lambda: {"rows": [[10, 1.0, 1, 0, 0, 60.0, 40.0, 0, 0]]})
+    with patch.object(yt, "_get_oauth_access_token", return_value="tok"), \
+         patch.object(yt.requests, "get", side_effect=fake_get):
+        recs = yt.fetch_video_analytics(["v1"], date(2024, 1, 1), date(2026, 10, 2), daily=False)
+    assert recs[0].period_type == "lifetime" and recs[0].period_date == date(2026, 10, 2)
 
 
 def test_module_has_a_main_entry_point():

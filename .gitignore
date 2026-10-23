@@ -4,3 +4,11 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+.pytest_cache/
+
+# Credentials -- never commit (GitHub push protection blocks these)
+client_secret_*.json
+*.apps.googleusercontent.com.json
+
+# Raw data exports
+*.csv

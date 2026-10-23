@@ -44,13 +44,23 @@ class AirtablePartnership:
     in_qbo: Optional[bool] = None  # real field, discovered in the actual base: explicit signal for QuickBooks reconciliation
     invoice_status: Optional[str] = None
     agreement_status: Optional[str] = None
+    # Bug list Oct 21 2026 #7: raw source text, plus a clearly-separate
+    # inferred month for bare month names ("June"). The canonical
+    # month_committed/month_completed columns are never inferred.
+    month_committed_raw: Optional[str] = None
+    month_completed_raw: Optional[str] = None
+    month_committed_inferred: Optional[date] = None
+    month_completed_inferred: Optional[date] = None
 
     def to_row(self) -> dict:
         row = asdict(self)
-        if self.month_committed:
-            row["month_committed"] = self.month_committed.isoformat()
-        if self.month_completed:
-            row["month_completed"] = self.month_completed.isoformat()
+        for k in ("month_committed", "month_completed",
+                  "month_committed_inferred", "month_completed_inferred"):
+            if row.get(k):
+                row[k] = row[k].isoformat()
+        for k in ("month_committed_raw", "month_completed_raw"):
+            if row.get(k) is not None:
+                row[k] = str(row[k]).strip() or None
         return row
 
 

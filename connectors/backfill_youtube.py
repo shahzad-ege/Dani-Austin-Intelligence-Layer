@@ -41,14 +41,14 @@ def main() -> None:
         print(f"[{i}/{len(stats_records)}] {stat.video_id} (published {start}): fetching real lifetime analytics...")
 
         try:
-            analytics = yc.fetch_video_analytics([stat.video_id], start, today)
+            analytics = yc.fetch_video_analytics([stat.video_id], start, today, daily=False)
             all_analytics.extend(analytics)
         except RuntimeError as e:
             print(f"  Analytics fetch failed, stopping backfill here (real credentials issue): {e}")
             break
 
         try:
-            traffic = yc.fetch_traffic_sources([stat.video_id], start, today)
+            traffic = yc.fetch_traffic_sources([stat.video_id], start, today, daily=False)
             all_traffic.extend(traffic)
         except RuntimeError as e:
             print(f"  Traffic source fetch failed for this video: {e}")

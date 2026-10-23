@@ -255,7 +255,9 @@ FAKE_VIDEO_RESPONSE = {
 def test_tiktok_run_aggregates_video_metrics():
     with patch("tiktok_connector.requests.post") as mock_post, \
          patch("tiktok_connector.requests.get") as mock_get, \
-         patch("tiktok_connector.upsert_rows") as mock_upsert:
+         patch("tiktok_connector.upsert_rows") as mock_upsert, \
+         patch("tiktok_connector._lifetime_totals_from_video_table",
+               return_value={"views": 15000.0, "likes": 1100.0, "comments": 0.0, "shares": 7.0}):
 
         mock_post.return_value = MagicMock(
             status_code=200, json=lambda: FAKE_TOKEN_RESPONSE, raise_for_status=lambda: None
@@ -279,6 +281,27 @@ def test_tiktok_run_aggregates_video_metrics():
 
         likes_row = next(r for r in written_rows if r["metric"] == "likes")
         assert likes_row["value"] == 1100.0  # 800 + 300
+
+        # Bug list #3: a metric with no real value is OMITTED, never written as 0
+        assert not any(r["metric"] == "comments" for r in written_rows)
+
+
+def test_tiktok_writes_no_engagement_rows_when_video_table_empty():
+    """Regression guard for the 29 days of fake zeros (Sep 23 - Oct 21 2026)."""
+    with patch("tiktok_connector._lifetime_totals_from_video_table", return_value=None):
+        assert tiktok_connector.fetch_video_metrics("tok") == []
+
+
+def test_lifetime_totals_paginates_past_1000_rows():
+    page1 = [{"video_views": 1, "likes": 1, "comments": 0, "shares": 0}] * 1000
+    page2 = [{"video_views": 2, "likes": 0, "comments": 1, "shares": 1}] * 5
+    client = MagicMock()
+    q = client.table.return_value.select.return_value.range
+    q.side_effect = [MagicMock(execute=lambda: MagicMock(data=page1)),
+                     MagicMock(execute=lambda: MagicMock(data=page2))]
+    with patch("db.get_client", return_value=client):
+        totals = tiktok_connector._lifetime_totals_from_video_table()
+    assert totals == {"views": 1010.0, "likes": 1000.0, "comments": 5.0, "shares": 5.0}
 
 
 if __name__ == "__main__":

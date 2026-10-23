@@ -30,9 +30,13 @@ from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
-MEGAPHONE_API_TOKEN = os.environ["MEGAPHONE_API_TOKEN"]
-MEGAPHONE_NETWORK_ID = os.environ["MEGAPHONE_NETWORK_ID"]
-MEGAPHONE_PODCAST_ID = os.environ["MEGAPHONE_PODCAST_ID"]
+# .strip() is deliberate (bug list Oct 21 2026 #2): podcast_episodes_megaphone
+# has 0 rows because every GitHub run 404s, while the same IDs work from a
+# local .env. A trailing newline/space pasted into a GitHub Secret becomes
+# part of the URL path and Megaphone answers 404 -- exactly this symptom.
+MEGAPHONE_API_TOKEN = os.environ["MEGAPHONE_API_TOKEN"].strip()
+MEGAPHONE_NETWORK_ID = os.environ["MEGAPHONE_NETWORK_ID"].strip()
+MEGAPHONE_PODCAST_ID = os.environ["MEGAPHONE_PODCAST_ID"].strip()
 BASE_URL = "https://cms.megaphone.fm/api"
 
 
@@ -65,7 +69,7 @@ class MegaphoneEpisode:
         }
 
 
-def fetch_episodes(limit: int = 100) -> list[MegaphoneEpisode]:
+def fetch_episodes(limit: int = 100, raise_on_error: bool = False) -> list[MegaphoneEpisode]:
     """
     Fetches real episode metadata. Confirmed real response shape via a
     live diagnostic run -- fields used below are all confirmed present,
@@ -82,10 +86,17 @@ def fetch_episodes(limit: int = 100) -> list[MegaphoneEpisode]:
         )
     except (requests.Timeout, requests.ConnectionError) as e:
         print(f"[megaphone] Request failed: {type(e).__name__}: {e}")
+        if raise_on_error:
+            raise RuntimeError(f"Megaphone request failed: {e}") from e
         return []
 
     if resp.status_code >= 400:
-        print(f"[megaphone] Episodes fetch FAILED ({resp.status_code}): {resp.text}")
+        # Don't dump the whole HTML 404 page into the log; show what helps.
+        print(f"[megaphone] Episodes fetch FAILED ({resp.status_code}): {resp.text[:200]!r}")
+        print(f"[megaphone]   network_id length={len(MEGAPHONE_NETWORK_ID)}, podcast_id length={len(MEGAPHONE_PODCAST_ID)} "
+              "(Megaphone IDs are 36-char UUIDs -- any other length means the GitHub Secret is wrong)")
+        if raise_on_error:
+            raise RuntimeError(f"Megaphone episodes fetch returned HTTP {resp.status_code}")
         return []
 
     data = resp.json()
@@ -137,7 +148,9 @@ def run() -> int:
     every other connector in run_all.py follows."""
     from writer import upsert_rows
 
-    episodes = fetch_episodes()
+    # raise_on_error: a failing pull must turn the daily job red instead of
+    # quietly reporting "OK -- 0 rows" (which is how this went unnoticed).
+    episodes = fetch_episodes(raise_on_error=True)
     if not episodes:
         return 0
     return upsert_rows("podcast_episodes_megaphone", [e.to_row() for e in episodes])

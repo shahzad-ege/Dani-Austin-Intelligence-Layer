@@ -13,8 +13,8 @@ from db import get_client
 # matching the `unique (...)` constraints defined in the schema.
 CONFLICT_KEYS = {
     "youtube_video_stats": "video_id",
-    "youtube_video_analytics": "video_id,period_date",
-    "youtube_traffic_sources": "video_id,period_date,traffic_source_type",
+    "youtube_video_analytics": "video_id,period_date,period_type",
+    "youtube_traffic_sources": "video_id,period_date,period_type,traffic_source_type",
     "tiktok_video_metrics": "item_id",
     "qb_da_transaction_lines": "qb_txn_id,qb_line_id",
     "qb_oauth_credentials": "realm_id",
@@ -30,7 +30,7 @@ CONFLICT_KEYS = {
     "social_metrics": "account_id,metric,period_date,source",
     "social_audience_demographics": "account_id,dimension,dimension_value,period_date",
     "social_posts": "account_id,post_id",
-    "social_post_metrics": "post_id,metric,fetched_at",
+    "social_post_metrics": "post_id,metric,fetched_date",  # one row per post/metric/UTC day (migration 035)
     "podcast_metrics": "show_id,platform,metric,period_date",
     "affiliate_commission_deals": "brand,month",
     "da_cash_flow_recurring_assumptions": "line_item",

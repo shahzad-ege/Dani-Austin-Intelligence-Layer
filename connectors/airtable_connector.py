@@ -146,6 +146,51 @@ def _parse_month(value) -> date | None:
     return None
 
 
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
+
+def _infer_bare_month(value, created_time: str | None) -> date | None:
+    """
+    Bug list Oct 21 2026 #7: since ~April 2025 the team enters Month
+    Committed as a bare month name ("June", "February "), so _parse_month()
+    correctly returns None and 550 rows have no month_committed.
+
+    This does NOT touch the canonical month_committed/month_completed
+    columns -- those stay strictly "what the source literally says". It
+    fills the separate *_inferred columns instead: the occurrence of that
+    month closest to the record's Airtable createdTime (within +/- 6
+    months). Anything else (typos like "January 20") stays None.
+    """
+    if not value or not created_time:
+        return None
+    month = _MONTHS.get(str(value).strip().lower())
+    if not month:
+        return None
+    try:
+        created = date.fromisoformat(created_time[:10])
+    except ValueError:
+        return None
+    candidates = [date(y, month, 1) for y in (created.year - 1, created.year, created.year + 1)]
+    created_month = date(created.year, created.month, 1)
+    return min(candidates, key=lambda d: abs((d - created_month).days))
+
+
+def _normalise_status(value) -> str:
+    """
+    Status is a MULTIPLE-select in the real base, so the API returns a
+    list. Storing str(list) produced '["Payment Received"]' (bug list #7).
+    Store a plain comma-separated string instead; 'Unknown' only when the
+    field is genuinely empty in Airtable.
+    """
+    if value is None or value == [] or value == "":
+        return "Unknown"
+    if isinstance(value, list):
+        return ", ".join(str(v).strip() for v in value if str(v).strip()) or "Unknown"
+    return str(value).strip()
+
+
 def _get_checkbox(fields: dict, key: str) -> bool:
     """
     Airtable's API OMITS unchecked checkbox fields from the response
@@ -186,7 +231,7 @@ def run() -> int:
             AirtablePartnership(
                 deal_id=rec["id"],
                 invoice_no=fields.get(FIELD_MAP["invoice_no"]),
-                status=fields.get(FIELD_MAP["status"], "Unknown"),
+                status=_normalise_status(fields.get(FIELD_MAP["status"])),
                 deliverable_platform=fields.get(FIELD_MAP["deliverable_platform"]),
                 client=fields.get(FIELD_MAP["client"]),
                 is_repeat=None,  # no real field exists for this
@@ -197,6 +242,10 @@ def run() -> int:
                 in_qbo=_get_checkbox(fields, FIELD_MAP["in_qbo"]),
                 invoice_status=fields.get(FIELD_MAP["invoice_status"]),
                 agreement_status=fields.get(FIELD_MAP["agreement_status"]),
+                month_committed_raw=month_committed_raw,
+                month_completed_raw=month_completed_raw,
+                month_committed_inferred=month_committed or _infer_bare_month(month_committed_raw, rec.get("createdTime")),
+                month_completed_inferred=month_completed or _infer_bare_month(month_completed_raw, rec.get("createdTime")),
             )
         )
 

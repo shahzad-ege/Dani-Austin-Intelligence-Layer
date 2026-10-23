@@ -85,23 +85,57 @@ QB_API_BASE = (
 PAGE_SIZE = 500  # QBO's max is 1000; 500 leaves a safer response-size margin
 
 
+def _vault_get_refresh_token() -> str | None:
+    """
+    Bug list Oct 21 2026 #13: the refresh token used to sit in plaintext in
+    public.qb_oauth_credentials. Migration 036 moves it into Supabase Vault
+    (encrypted at rest) behind two SECURITY DEFINER functions that only the
+    service_role can execute. Returns None if Vault isn't set up yet (so
+    this code is safe to deploy BEFORE migration 036 is applied).
+    """
+    try:
+        resp = get_client().rpc("qb_get_refresh_token", {"p_realm_id": QB_REALM_ID}).execute()
+    except Exception as e:  # function not created yet, or network blip
+        print(f"[qb] Vault token read unavailable ({type(e).__name__}) -- falling back to table.")
+        return None
+    token = resp.data
+    return token if isinstance(token, str) and token.strip() else None
+
+
+def _vault_set_refresh_token(refresh_token: str) -> bool:
+    """Writes the rotated token to Vault. Returns False if Vault isn't set up."""
+    try:
+        get_client().rpc(
+            "qb_set_refresh_token", {"p_realm_id": QB_REALM_ID, "p_token": refresh_token}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"[qb] Vault token write unavailable ({type(e).__name__}) -- falling back to table.")
+        return False
+
+
 def load_stored_refresh_token() -> str:
     """
-    Reads the current refresh token from qb_oauth_credentials. Falls back
-    to QB_REFRESH_TOKEN from .env only if no row exists yet (i.e. this is
-    the very first run since the OAuth Playground consent step) -- every
-    run after that uses the rotated token stored here, not the original
-    .env value, which QuickBooks will have already invalidated.
+    Reads the current refresh token: Vault first (migration 036), then the
+    legacy qb_oauth_credentials row. Falls back to QB_REFRESH_TOKEN from
+    .env only if neither has one (i.e. the very first run since the OAuth
+    Playground consent step) -- every run after that uses the rotated
+    token, not the original .env value, which QuickBooks will have already
+    invalidated.
     """
+    vault_token = _vault_get_refresh_token()
+    if vault_token:
+        return vault_token
+
     client = get_client()
     result = client.table("qb_oauth_credentials").select("*").eq("realm_id", QB_REALM_ID).execute()
-    if result.data:
+    if result.data and result.data[0].get("refresh_token"):
         return result.data[0]["refresh_token"]
 
     bootstrap_token = os.environ.get("QB_REFRESH_TOKEN")
     if not bootstrap_token:
         raise RuntimeError(
-            "No stored refresh token in qb_oauth_credentials, and QB_REFRESH_TOKEN "
+            "No stored refresh token in Vault or qb_oauth_credentials, and QB_REFRESH_TOKEN "
             "is not set in the environment to bootstrap from. Run the OAuth "
             "Playground consent flow first."
         )
@@ -113,7 +147,10 @@ def save_refreshed_token(refresh_token: str) -> None:
     Saves the newly rotated refresh token IMMEDIATELY after refreshing,
     before doing anything else that could fail -- so a later error in this
     run can never lose the new token and strand the connection.
+    Vault when available (migration 036); legacy table otherwise.
     """
+    if _vault_set_refresh_token(refresh_token):
+        return
     upsert_rows(
         "qb_oauth_credentials",
         [{"realm_id": QB_REALM_ID, "refresh_token": refresh_token}],
