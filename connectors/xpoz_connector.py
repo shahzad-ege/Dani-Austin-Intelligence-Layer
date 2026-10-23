@@ -215,6 +215,28 @@ _REQUESTED_FIELDS = {
 }
 
 
+REDDIT_MAX_LIMIT = 100
+
+
+def dedupe_mentions(mentions: list) -> list:
+    """
+    Oct 23 2026: one Xpoz pull returned the same post more than once
+    (overlapping pages), and Postgres rejects an upsert that touches the
+    same (platform, post_id) twice in one statement ("ON CONFLICT DO
+    UPDATE command cannot affect row a second time") -- so the WHOLE
+    batch of 1,393 mentions was lost, most likely the cause of the missed
+    10/19 week too. Keep one row per (platform, post_id): the copy with
+    the highest engagement, i.e. the freshest counts.
+    """
+    best = {}
+    for m in mentions:
+        key = (m.platform, m.post_id)
+        score = (m.like_count or 0) + (m.comment_count or 0) + (m.share_count or 0)
+        if key not in best or score >= best[key][0]:
+            best[key] = (score, m)
+    return [m for _, m in best.values()]
+
+
 def search_mentions(keyword: str, platform: str, limit: int = 100) -> list[dict]:
     """
     Searches one platform for real mentions of a keyword, using the real
@@ -271,7 +293,12 @@ def search_mentions(keyword: str, platform: str, limit: int = 100) -> list[dict]
             if platform == "reddit":
                 extra_kwargs["sort"] = "new"
 
-            result = namespace.search_posts(query, limit=limit, fields=_REQUESTED_FIELDS[platform], **extra_kwargs)
+            # Oct 23 2026: Xpoz now validates Reddit's limit and rejects
+            # anything above 100 ("Too big: expected number to be <=100"),
+            # which zeroed Reddit for the week. Ask for at most 100 per
+            # call there and let the pagination loop below go further.
+            request_limit = min(limit, REDDIT_MAX_LIMIT) if platform == "reddit" else limit
+            result = namespace.search_posts(query, limit=request_limit, fields=_REQUESTED_FIELDS[platform], **extra_kwargs)
         except Exception as e:
             print(f"[xpoz] '{platform}' search FAILED: {type(e).__name__}: {e}")
             return []
@@ -302,7 +329,7 @@ def fetch_all_mentions(keyword: str = "Dani Austin", limit_per_platform: int = 1
     for platform in TRACKED_PLATFORMS:
         mentions = search_mentions(keyword, platform, limit_per_platform)
         results[platform] = mentions
-        print(f"[xpoz] '{platform}': {len(mentions)} mention(s) for {keyword!r}")
+        print(f"[xpoz] '{platform}': {len(mentions)} mention(s) for {keyword!r}", flush=True)
 
     return results
 
@@ -347,4 +374,7 @@ def run() -> int:
 
     results = fetch_all_mentions(DEFAULT_KEYWORD)
     mentions = normalize_mentions(results, DEFAULT_KEYWORD)
-    return upsert_rows("earned_mentions", [m.to_row() for m in mentions])
+    unique = dedupe_mentions(mentions)
+    if len(unique) < len(mentions):
+        print(f"[xpoz] Dropped {len(mentions) - len(unique)} duplicate mention(s) returned twice by Xpoz.", flush=True)
+    return upsert_rows("earned_mentions", [m.to_row() for m in unique])

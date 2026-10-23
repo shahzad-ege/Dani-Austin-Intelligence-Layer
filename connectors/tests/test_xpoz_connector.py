@@ -9,6 +9,7 @@ correct architecture (MCP-based tool calls via XpozClient, not plain
 REST).
 """
 
+from datetime import date
 import os
 import sys
 from unittest.mock import patch, MagicMock
@@ -329,3 +330,32 @@ def test_sort_new_applied_only_to_reddit():
 
     assert mock_client.reddit.search_posts.call_args.kwargs.get("sort") == "new"
     assert "sort" not in mock_client.twitter.search_posts.call_args.kwargs
+
+
+# --- Oct 23 2026 live-run fixes ------------------------------------------
+
+def test_duplicate_posts_in_one_pull_are_collapsed_before_upsert():
+    """A repeated (platform, post_id) made Postgres reject the whole batch."""
+    a = xp.EarnedMention(platform="instagram", post_id="1", author="x", content_text="t", url=None,
+                         like_count=5, comment_count=0, share_count=0, keyword_matched="Dani Austin", fetched_at=date(2026, 10, 23))
+    b = xp.EarnedMention(platform="instagram", post_id="1", author="x", content_text="t", url=None,
+                         like_count=9, comment_count=1, share_count=0, keyword_matched="Dani Austin", fetched_at=date(2026, 10, 23))
+    c = xp.EarnedMention(platform="tiktok", post_id="1", author="y", content_text="t", url=None,
+                         like_count=1, comment_count=0, share_count=0, keyword_matched="Dani Austin", fetched_at=date(2026, 10, 23))
+    out = xp.dedupe_mentions([a, b, c])
+    assert len(out) == 2
+    assert next(m for m in out if m.platform == "instagram").like_count == 9  # freshest counts kept
+
+
+def test_reddit_request_limit_capped_at_100():
+    """Xpoz rejects Reddit limits above 100 ("Too big: expected number to be <=100")."""
+    mock_client = MagicMock()
+    page = MagicMock(data=[], has_next_page=lambda: False)
+    mock_client.reddit.search_posts.return_value = page
+    mock_client.twitter.search_posts.return_value = page
+    with patch("xpoz_connector.XpozClient") as mc:
+        mc.return_value.__enter__.return_value = mock_client
+        xp.search_mentions("Dani Austin", "reddit", limit=1000)
+        xp.search_mentions("Dani Austin", "twitter", limit=1000)
+    assert mock_client.reddit.search_posts.call_args.kwargs["limit"] == 100
+    assert mock_client.twitter.search_posts.call_args.kwargs["limit"] == 1000
