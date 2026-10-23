@@ -1,9 +1,20 @@
 name: Apply SQL Migrations
 
-# Manual-only. Run this after adding a new file to sql/ (e.g. when the
-# social or podcast connectors come online and need schema changes).
+# Manual-only. Applies ONLY the sql/NNN_*.sql files whose version is not
+# yet recorded in public.da_schema_migrations, in order, stopping at the
+# first error.
+#
+# Why (bug list Oct 21 2026 #15): the previous version re-ran EVERY file
+# from 001 on each run. Old files are not all idempotent, and some (e.g.
+# 034) re-create anon/authenticated policies that the Oct 7 2026 lockdown
+# deliberately removed -- re-running them would silently re-open the data.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List pending migrations without applying them"
+        type: boolean
+        default: true
 
 jobs:
   migrate:
@@ -15,11 +26,28 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - name: Apply all SQL files in sql/, in order
+      - name: Apply pending migrations
         env:
           DATABASE_URL: ${{ secrets.DA_DATABASE_URL }} # postgres connection string, from Supabase project settings
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          for f in $(ls sql/*.sql | sort); do
-            echo "Applying $f"
-            psql "$DATABASE_URL" -f "$f"
+          set -euo pipefail
+          applied=$(psql "$DATABASE_URL" -Atc "select version from public.da_schema_migrations" 2>/dev/null || true)
+          if [ -z "$applied" ]; then
+            echo "::error::public.da_schema_migrations not found. Apply sql/035_oct21_bug_list_fixes.sql once by hand (SQL editor) -- it creates the table and records 001-035 as applied."
+            exit 1
+          fi
+          pending=0
+          for f in $(ls sql/[0-9][0-9][0-9]_*.sql | sort); do
+            v=$(basename "$f" | cut -d_ -f1)
+            if echo "$applied" | grep -qx "$v"; then continue; fi
+            pending=$((pending+1))
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "PENDING: $f"
+            else
+              echo "Applying $f"
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "insert into public.da_schema_migrations(version, description) values ('$v', '$(basename "$f")') on conflict (version) do nothing"
+            fi
           done
+          echo "$pending pending migration(s)."
